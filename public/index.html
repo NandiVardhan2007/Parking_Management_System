@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>KPR Transport</title>
+  <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Share+Tech+Mono&family=Exo+2:wght@300;400;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- NOTIFICATIONS -->
+<div class="notify-wrap" id="notifyWrap"></div>
+
+<!-- ============ HEADER ============ -->
+<header class="app-header">
+  <div class="hdr-logo">
+    <div class="hdr-icon">🚛</div>
+    <div class="hdr-brand">
+      <div class="name">KPR TRANSPORT</div>
+      <div class="sub">Parking System</div>
+    </div>
+  </div>
+  <div class="hdr-clock">
+    <div class="t" id="clockTime">--:--</div>
+    <div class="d" id="clockDate">---</div>
+    <div id="onlineBadge" style="font-size:10px;font-family:'Share Tech Mono',monospace;margin-top:3px;color:#f59e0b">○ Connecting</div>
+  </div>
+</header>
+
+<!-- ============ APP BODY ============ -->
+<div class="app-body" id="appBody">
+
+  <!-- ======== ENTRY PANEL ======== -->
+  <div class="panel active" id="panel-entry">
+
+    <div class="stats-grid">
+      <div class="stat-card sc-g">
+        <div class="s-lbl">Parked Now</div>
+        <div class="s-val" id="s-parked">0</div>
+      </div>
+      <div class="stat-card sc-y">
+        <div class="s-lbl">Today Entries</div>
+        <div class="s-val" id="s-today">0</div>
+      </div>
+      <div class="stat-card sc-b">
+        <div class="s-lbl">Today Exits</div>
+        <div class="s-val" id="s-exits">0</div>
+      </div>
+      <div class="stat-card sc-r">
+        <div class="s-lbl">Today Revenue</div>
+        <div class="s-val" id="s-rev">Rs.0</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">🚛 New Lorry Entry</div>
+
+      <div class="token-banner">
+        <div>
+          <div class="lbl">Next Token No.</div>
+          <div class="val" id="nextToken">#1</div>
+        </div>
+        <div class="ico">🎫</div>
+      </div>
+
+      <div class="fg">
+        <label>Lorry Number *</label>
+        <input
+          type="text"
+          id="entryLorry"
+          class="inp-lorry"
+          placeholder="TN 01 AB 1234"
+          autocomplete="off"
+          autocorrect="off"
+          spellcheck="false"
+          oninput="this.value=this.value.toUpperCase()">
+      </div>
+
+      <div class="row2">
+        <div class="fg">
+          <label>Entry Date</label>
+          <input type="text" id="entryDate" readonly>
+        </div>
+        <div class="fg">
+          <label>Entry Time</label>
+          <input type="text" id="entryTime" readonly>
+        </div>
+      </div>
+
+      <div class="fg">
+        <label>Driver Name (Optional)</label>
+        <input type="text" id="entryDriver" placeholder="Driver name" autocomplete="name">
+      </div>
+
+      <div class="fg">
+        <label>Driver Phone (Optional)</label>
+        <input type="tel" id="entryPhone" placeholder="98765 43210" maxlength="15" autocomplete="tel">
+      </div>
+
+      <div class="fg">
+        <label>Remarks (Optional)</label>
+        <input type="text" id="entryRemarks" placeholder="Goods type, notes...">
+      </div>
+
+      <button class="btn btn-primary" onclick="recordEntry()">🎫 Record Entry &amp; Print Receipt</button>
+      <button class="btn btn-ghost"   onclick="clearEntry()">✕ Clear Form</button>
+    </div>
+
+    <div class="sec-hdr"><h2>Recently Parked</h2></div>
+    <div id="recentList"></div>
+
+  </div><!-- /panel-entry -->
+
+  <!-- ======== EXIT PANEL ======== -->
+  <div class="panel" id="panel-exit">
+
+    <div class="card">
+      <div class="card-title">🔓 Process Exit</div>
+
+      <div class="fg">
+        <label>Enter Token Number</label>
+        <div style="position:relative">
+          <span style="position:absolute;left:16px;top:50%;transform:translateY(-50%);font-family:'Share Tech Mono',monospace;font-size:22px;color:#f59e0b;pointer-events:none;font-weight:bold">#</span>
+          <input
+            type="number"
+            id="exitToken"
+            class="inp-token"
+            placeholder="  1"
+            style="padding-left:42px"
+            min="1"
+            autocomplete="off"
+            oninput="lookupToken(this.value)"
+            onkeydown="if(event.key==='Enter') processExit()">
+        </div>
+      </div>
+
+      <div class="row2" style="margin-bottom:14px">
+        <div class="fg" style="margin-bottom:0">
+          <label>Exit Date</label>
+          <input type="text" id="exitDate" readonly>
+        </div>
+        <div class="fg" style="margin-bottom:0">
+          <label>Exit Time</label>
+          <input type="text" id="exitTime" readonly style="color:#ef4444">
+        </div>
+      </div>
+
+      <!-- Error box -->
+      <div class="err-box" id="exitError"></div>
+
+      <!-- Lookup result card -->
+      <div class="lookup-card" id="lookupCard">
+        <div class="lk-head">
+          <div class="lk-token" id="lkToken">#--</div>
+          <div>
+            <div class="lk-badge">Token Found ✓</div>
+            <div class="lk-lorry" id="lkLorry">--</div>
+          </div>
+        </div>
+        <div class="lk-details" id="lkDetails"></div>
+        <div class="amount-box">
+          <div class="a-lbl">Total Amount Due</div>
+          <div class="a-val" id="lkAmount">Rs.0</div>
+          <div class="a-info" id="lkInfo"></div>
+        </div>
+      </div>
+
+      <button class="btn btn-danger" onclick="processExit()">⬇ Process Exit &amp; Print Receipt</button>
+      <button class="btn btn-ghost"  onclick="clearExitForm()">✕ Clear</button>
+    </div>
+
+    <div class="sec-hdr">
+      <h2>Currently Parked</h2>
+      <span id="parkedCount" style="font-family:'Share Tech Mono',monospace;color:#f59e0b;font-size:14px"></span>
+    </div>
+
+    <div class="search-wrap">
+      <span class="s-icon">🔍</span>
+      <input type="text" placeholder="Search token or lorry..." oninput="filterParked(this.value)">
+    </div>
+
+    <div id="parkedList"></div>
+
+  </div><!-- /panel-exit -->
+
+  <!-- ======== RECORDS PANEL ======== -->
+  <div class="panel" id="panel-records">
+
+    <div class="stats-grid">
+      <div class="stat-card sc-y">
+        <div class="s-lbl">Total Records</div>
+        <div class="s-val" id="s-total">0</div>
+      </div>
+      <div class="stat-card sc-g">
+        <div class="s-lbl">Parked</div>
+        <div class="s-val" id="s-p2">0</div>
+      </div>
+      <div class="stat-card sc-b">
+        <div class="s-lbl">Exited</div>
+        <div class="s-val" id="s-exited">0</div>
+      </div>
+      <div class="stat-card sc-r">
+        <div class="s-lbl">Total Revenue</div>
+        <div class="s-val" id="s-totalrev">Rs.0</div>
+      </div>
+    </div>
+
+    <div class="search-wrap">
+      <span class="s-icon">🔍</span>
+      <input type="text" id="recSearch" placeholder="Search lorry, driver, token..." oninput="renderRecords()">
+    </div>
+
+    <div class="pills">
+      <button class="pill active" onclick="setFilter('all', this)">All</button>
+      <button class="pill"        onclick="setFilter('IN',  this)">Parked</button>
+      <button class="pill"        onclick="setFilter('OUT', this)">Exited</button>
+    </div>
+
+    <div id="recordsList"></div>
+
+  </div><!-- /panel-records -->
+
+  <!-- ======== SETTINGS PANEL ======== -->
+  <div class="panel" id="panel-settings">
+
+    <!-- Billing Rate -->
+    <div class="card">
+      <div class="card-title">⚙ Billing Rate</div>
+      <div class="fg">
+        <label>Daily Parking Rate (Rs. per day)</label>
+        <input
+          type="number"
+          id="dailyRateInput"
+          value="120"
+          min="1"
+          style="font-size:28px;font-family:'Share Tech Mono',monospace;color:#f59e0b;font-weight:bold;text-align:center"
+          onchange="saveRate()">
+      </div>
+      <div style="background:#12161e;border-radius:10px;padding:12px;font-size:12px;color:#5a6a80;line-height:1.9;text-align:center">
+        Billing: <span style="color:#e8edf5;font-family:'Share Tech Mono',monospace">Days x Rs.<span id="rateShow">120</span>/day</span><br>
+        Partial days are counted as full days
+      </div>
+    </div>
+
+    <!-- Import -->
+    <div class="io-card">
+      <div class="io-ico">📥</div>
+      <div class="io-title">Import from Excel</div>
+      <div class="io-desc">
+        Upload an Excel (.xlsx / .xls) or CSV file.<br>
+        Columns: Lorry Number, Driver Name, Driver Phone, Entry DateTime, Exit DateTime, Remarks
+      </div>
+      <label class="file-drop" id="dropZone">
+        <input type="file" id="importFile" accept=".xlsx,.xls,.csv" onchange="importExcel(event)">
+        <div style="font-size:32px;margin-bottom:8px">📂</div>
+        <div style="font-size:13px;color:#5a6a80">Tap to choose file</div>
+        <div style="font-size:11px;color:#5a6a80;margin-top:3px">.xlsx / .xls / .csv</div>
+      </label>
+      <div id="importStatus" style="font-size:13px;color:#22c55e;text-align:center;min-height:18px"></div>
+    </div>
+
+    <!-- Export -->
+    <div class="io-card">
+      <div class="io-ico">📤</div>
+      <div class="io-title">Export to Excel</div>
+      <div class="io-desc">
+        Download records with Token, Lorry, Driver, Phone, Entry/Exit times, Duration and Amount.
+      </div>
+      <button class="btn btn-success" onclick="exportExcel('all')">📊 Export All Records</button>
+      <button class="btn btn-ghost"   onclick="exportExcel('in')">🅿 Export Parked Only</button>
+      <button class="btn btn-ghost"   onclick="exportExcel('out')">✅ Export Exited Only</button>
+    </div>
+
+    <!-- Danger Zone -->
+    <div class="card" style="border-color:rgba(239,68,68,0.2)">
+      <div class="card-title" style="color:#ef4444">⚠ Danger Zone</div>
+      <p style="font-size:13px;color:#5a6a80;margin-bottom:14px;line-height:1.6">
+        Permanently delete all records. This cannot be undone.
+      </p>
+      <button class="btn btn-ghost" style="border-color:rgba(239,68,68,0.3);color:#ef4444" onclick="clearAllData()">
+        🗑 Clear All Data
+      </button>
+    </div>
+
+  </div><!-- /panel-settings -->
+
+</div><!-- /app-body -->
+
+<!-- ============ BOTTOM NAV ============ -->
+<nav class="bottom-nav">
+  <button class="nav-btn active" id="nav-entry"    onclick="goTab('entry',    this)"><span class="ico">⬆</span>Entry</button>
+  <button class="nav-btn"        id="nav-exit"     onclick="goTab('exit',     this)"><span class="ico">⬇</span>Exit</button>
+  <button class="nav-btn"        id="nav-records"  onclick="goTab('records',  this)"><span class="ico">📋</span>Records</button>
+  <button class="nav-btn"        id="nav-settings" onclick="goTab('settings', this)"><span class="ico">⚙</span>Settings</button>
+</nav>
+
+<!-- ============ RECEIPT OVERLAY ============ -->
+<div class="receipt-ov" id="receiptOv">
+  <div class="receipt" id="receiptContent"></div>
+  <div class="rcpt-btns">
+    <button class="btn btn-primary btn-sm" style="width:100%;padding:14px" onclick="printReceipt()">🖨 Print</button>
+    <button class="btn btn-ghost   btn-sm" style="width:100%;padding:14px" onclick="closeReceipt()">✕ Close</button>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

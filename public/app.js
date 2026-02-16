@@ -8,14 +8,12 @@ const API = window.location.hostname === 'localhost' || window.location.hostname
   ? `http://${window.location.hostname}:3000/api`
   : `${window.location.origin}/api`;
 
-// ── PRINT SERVER CONFIG ─────────────────────────────────────
 // Change the IP below to your parking laptop's local IP address.
-// To find it: Windows → open CMD → type "ipconfig" → look for IPv4 Address
-//             Linux/Mac → open Terminal → type "ip addr" or "ifconfig"
-// Both devices (phone/PC running the website + parking laptop) must be on the SAME WiFi.
-const PRINT_SERVER = 'http://192.168.1.3';  // ← CHANGE THIS TO YOUR LAPTOP IP
-const PRINT_SECRET = 'KPR2024SECRET';              // Must match print_server.py
-// ────────────────────────────────────────────────────────────
+// ── PRINT CONFIG ─────────────────────────────────────────────────
+// Print jobs go to Render queue → parking laptop polls & prints silently.
+// Must match SECRET_TOKEN in config.ini on the parking laptop.
+const PRINT_SECRET = 'KPR2024SECRET';
+// ─────────────────────────────────────────────────────────────────
 
 // ── Data Store (local cache) ────────────────────────────────
 let db          = JSON.parse(localStorage.getItem('kpr_db')   || '[]');
@@ -331,28 +329,31 @@ async function processExit() {
   notify('Token #' + num + ' exited — Rs.' + rec.amount, 'success');
 }
 
-// ── AUTO PRINT — Send to parking laptop printer ───────────────
+// ── AUTO PRINT — Queue job on Render server ──────────────────
+// The parking laptop polls the Render server every 3 seconds,
+// picks up jobs, and prints them silently — no tunnels needed!
 async function sendToPrinter(data) {
   try {
-    const resp = await fetch(`${PRINT_SERVER}/print`, {
+    const resp = await fetch(`${API}/print-queue`, {
       method: 'POST',
       headers: {
         'Content-Type':  'application/json',
         'X-Print-Token': PRINT_SECRET
       },
       body: JSON.stringify(data),
-      signal: AbortSignal.timeout(6000)
+      signal: AbortSignal.timeout(8000)
     });
     if (resp.ok) {
-      notify('🖨 Receipt sent to printer ✓', 'success');
+      const json = await resp.json();
+      console.log('[KPR Print] Job queued, ID:', json.data?.job_id);
+      notify('🖨 Print job queued — printing at parking ✓', 'success');
     } else {
-      console.warn('[KPR Print] Server responded with error:', resp.status);
-      notify('⚠ Printer server error (' + resp.status + ')', 'warn');
+      console.warn('[KPR Print] Queue error:', resp.status);
+      notify('⚠ Print queue error (' + resp.status + ')', 'warn');
     }
   } catch (err) {
-    // Non-fatal — printer offline or laptop not reachable
-    console.warn('[KPR Print] Print server unreachable:', err.message);
-    notify('⚠ Printer offline — use browser print', 'warn');
+    console.warn('[KPR Print] Queue unreachable:', err.message);
+    notify('⚠ Could not queue print job', 'warn');
   }
 }
 

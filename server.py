@@ -1,19 +1,26 @@
 # ================================================================
 #  KPR TRANSPORT PARKING SYSTEM — Python Backend
-#  server.py  |  Flask + SQLite (stdlib sqlite3)
+#  server.py  |  Flask + SQLite
 #
-#  Endpoints:
+#  Endpoints (original):
 #    GET    /api/health
 #    GET    /api/stats
 #    GET    /api/settings
 #    POST   /api/settings
-#    GET    /api/records          ?status=IN|OUT  &q=search  &page=1  &limit=200
+#    GET    /api/records
 #    GET    /api/records/<id>
 #    POST   /api/records
 #    PATCH  /api/records/<id>/exit
 #    DELETE /api/records/<id>
-#    DELETE /api/records          (body: {"confirm":"DELETE_ALL"})
+#    DELETE /api/records
 #    POST   /api/import
+#
+#  NEW — Print Queue endpoints:
+#    POST   /api/print-queue          ← website adds a print job
+#    GET    /api/print-queue/pending  ← laptop polls for new jobs
+#    PATCH  /api/print-queue/<id>/ack ← laptop marks job as done
+#    GET    /api/print-queue          ← view all jobs (admin)
+#    DELETE /api/print-queue/<id>     ← delete a job
 # ================================================================
 
 import os
@@ -32,23 +39,20 @@ DB_PATH = os.environ.get("DB_PATH", str(Path(__file__).parent / "kpr.db"))
 PUBLIC  = Path(__file__).parent / "public"
 
 app = Flask(__name__, static_folder=None)
-CORS(app)  # Allow all origins (fine for local network use)
+CORS(app)
 
 # ── Database ──────────────────────────────────────────────────────
 def get_db() -> sqlite3.Connection:
-    """Open a connection with row_factory so rows act like dicts."""
     con = sqlite3.connect(DB_PATH, check_same_thread=False)
     con.row_factory = sqlite3.Row
-    # Performance settings — mirrors the Node version
     con.execute("PRAGMA journal_mode = WAL")
     con.execute("PRAGMA synchronous  = NORMAL")
-    con.execute("PRAGMA cache_size   = -32000")   # 32 MB
+    con.execute("PRAGMA cache_size   = -32000")
     con.execute("PRAGMA foreign_keys = ON")
     return con
 
 @contextmanager
 def db_conn():
-    """Context manager — commits on success, rolls back on error."""
     con = get_db()
     try:
         yield con
@@ -61,7 +65,6 @@ def db_conn():
 
 
 def init_db():
-    """Create tables, indexes and seed default settings."""
     with db_conn() as con:
         con.executescript("""
             CREATE TABLE IF NOT EXISTS records (
@@ -87,11 +90,21 @@ def init_db():
                 value TEXT NOT NULL
             );
 
-            CREATE INDEX IF NOT EXISTS idx_status ON records(status);
-            CREATE INDEX IF NOT EXISTS idx_lorry  ON records(lorry);
-            CREATE INDEX IF NOT EXISTS idx_token  ON records(token);
-            CREATE INDEX IF NOT EXISTS idx_entry  ON records(entry_iso);
-            CREATE INDEX IF NOT EXISTS idx_exit   ON records(exit_iso);
+            CREATE TABLE IF NOT EXISTS print_queue (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_data    TEXT    NOT NULL,
+                status      TEXT    NOT NULL DEFAULT 'pending'
+                                    CHECK(status IN ('pending','done','failed')),
+                created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+                ack_at      TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_status    ON records(status);
+            CREATE INDEX IF NOT EXISTS idx_lorry     ON records(lorry);
+            CREATE INDEX IF NOT EXISTS idx_token     ON records(token);
+            CREATE INDEX IF NOT EXISTS idx_entry     ON records(entry_iso);
+            CREATE INDEX IF NOT EXISTS idx_exit      ON records(exit_iso);
+            CREATE INDEX IF NOT EXISTS idx_pq_status ON print_queue(status);
 
             INSERT OR IGNORE INTO settings(key, value) VALUES ('daily_rate', '120');
         """)
@@ -100,7 +113,6 @@ init_db()
 
 # ── Helpers ───────────────────────────────────────────────────────
 def row_to_dict(row) -> dict | None:
-    """Convert a sqlite3.Row to a plain dict with camelCase keys."""
     if row is None:
         return None
     r = dict(row)
@@ -126,7 +138,6 @@ def get_rate(con: sqlite3.Connection) -> float:
     return float(row["value"]) if row else 120.0
 
 def calc_days(entry_iso: str, exit_iso: str) -> int:
-    """Ceiling of (exit - entry) in days, minimum 1."""
     entry = datetime.datetime.fromisoformat(entry_iso.replace("Z", "+00:00"))
     exit_ = datetime.datetime.fromisoformat(exit_iso.replace("Z", "+00:00"))
     diff  = (exit_ - entry).total_seconds()
@@ -138,9 +149,7 @@ def now_iso() -> str:
     return datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 def fmt_display(iso: str) -> str:
-    """Format an ISO string to a human-readable Indian locale-style string."""
-    dt = datetime.datetime.fromisoformat(iso.replace("Z", "+00:00"))
-    # Convert UTC → IST (UTC+5:30)
+    dt  = datetime.datetime.fromisoformat(iso.replace("Z", "+00:00"))
     ist = dt + datetime.timedelta(hours=5, minutes=30)
     return ist.strftime("%-d/%-m/%Y, %-I:%M:%S %p")
 
@@ -158,7 +167,7 @@ def ok(data=None, **kwargs):
 def err(msg: str, status: int = 400):
     return jsonify({"ok": False, "error": msg}), status
 
-# ── Static files (serve frontend from ./public) ───────────────────
+# ── Static files ──────────────────────────────────────────────────
 if PUBLIC.exists():
     @app.route("/", defaults={"path": ""})
     @app.route("/<path:path>")
@@ -167,15 +176,13 @@ if PUBLIC.exists():
             return send_from_directory(str(PUBLIC), path)
         return send_from_directory(str(PUBLIC), "index.html")
 
-# ── Routes ────────────────────────────────────────────────────────
+# ── Original Routes ───────────────────────────────────────────────
 
-# ▸ GET /api/health
 @app.get("/api/health")
 def health():
     return ok(db=DB_PATH, timestamp=now_iso())
 
 
-# ▸ GET /api/stats
 @app.get("/api/stats")
 def stats():
     today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
@@ -194,7 +201,6 @@ def stats():
     return ok(dict(row))
 
 
-# ▸ GET /api/settings
 @app.get("/api/settings")
 def get_settings():
     with db_conn() as con:
@@ -202,7 +208,6 @@ def get_settings():
     return ok({r["key"]: r["value"] for r in rows})
 
 
-# ▸ POST /api/settings
 @app.post("/api/settings")
 def post_settings():
     body = request.get_json(silent=True) or {}
@@ -219,7 +224,6 @@ def post_settings():
     return ok({"daily_rate": rate})
 
 
-# ▸ GET /api/records
 @app.get("/api/records")
 def list_records():
     status = request.args.get("status", "").upper()
@@ -261,7 +265,6 @@ def list_records():
     })
 
 
-# ▸ GET /api/records/<id>
 @app.get("/api/records/<int:record_id>")
 def get_record(record_id: int):
     with db_conn() as con:
@@ -271,16 +274,14 @@ def get_record(record_id: int):
     return ok(row_to_dict(row))
 
 
-# ▸ POST /api/records  — new entry
 @app.post("/api/records")
 def create_record():
-    body = request.get_json(silent=True) or {}
+    body  = request.get_json(silent=True) or {}
     lorry = (body.get("lorry") or "").strip().upper()
     if not lorry:
         return err("lorry is required")
 
     with db_conn() as con:
-        # Duplicate check
         dup = con.execute(
             "SELECT token FROM records WHERE lorry=? COLLATE NOCASE AND status='IN'",
             (lorry,)
@@ -288,10 +289,9 @@ def create_record():
         if dup:
             return err(f"{lorry} is already parked (Token #{dup['token']})", 409)
 
-        # Timestamps
-        entry_iso = body.get("entryISO") or now_iso()
+        entry_iso     = body.get("entryISO") or now_iso()
         entry_display = fmt_display(entry_iso)
-        token = next_token(con)
+        token         = next_token(con)
 
         con.execute("""
             INSERT INTO records
@@ -311,7 +311,6 @@ def create_record():
     return ok(row_to_dict(new_row)), 201
 
 
-# ▸ PATCH /api/records/<id>/exit
 @app.route("/api/records/<int:record_id>/exit", methods=["PATCH"])
 def process_exit(record_id: int):
     body = request.get_json(silent=True) or {}
@@ -339,7 +338,6 @@ def process_exit(record_id: int):
     return ok(row_to_dict(updated))
 
 
-# ▸ DELETE /api/records/<id>
 @app.delete("/api/records/<int:record_id>")
 def delete_record(record_id: int):
     with db_conn() as con:
@@ -350,7 +348,6 @@ def delete_record(record_id: int):
     return ok(message=f"Record {record_id} deleted")
 
 
-# ▸ DELETE /api/records  — clear ALL
 @app.delete("/api/records")
 def delete_all_records():
     body = request.get_json(silent=True) or {}
@@ -361,7 +358,6 @@ def delete_all_records():
     return ok(message="All records deleted")
 
 
-# ▸ POST /api/import  — bulk import
 @app.post("/api/import")
 def bulk_import():
     body    = request.get_json(silent=True) or {}
@@ -387,14 +383,13 @@ def bulk_import():
                 days      = calc_days(entry_iso, exit_iso) if exit_iso else None
                 amount    = days * rate if days else None
 
-                # Token resolution
                 token = int(r["token"]) if r.get("token") else None
                 if token:
                     conflict = con.execute(
                         "SELECT id FROM records WHERE token=?", (token,)
                     ).fetchone()
                     if conflict:
-                        token = None  # fall through to auto-assign
+                        token = None
 
                 if not token:
                     token = next_token(con)
@@ -435,8 +430,166 @@ def bulk_import():
     return jsonify(resp)
 
 
+# ================================================================
+#  PRINT QUEUE — New endpoints
+# ================================================================
+#
+#  How it works:
+#  1. Website clicks Print → POST /api/print-queue  (saves job to DB)
+#  2. Parking laptop runs print_server.py which polls every 3 seconds:
+#       GET /api/print-queue/pending  → gets new jobs
+#  3. Laptop prints receipt silently
+#  4. Laptop confirms:
+#       PATCH /api/print-queue/<id>/ack  → marks job done
+#
+#  No tunnels. No port forwarding. Works from anywhere.
+# ================================================================
+
+@app.post("/api/print-queue")
+def enqueue_print():
+    """
+    Website calls this when user clicks Print.
+    Saves the receipt data into the queue.
+    """
+    # Optional secret check (uses same secret as config.ini SECRET_TOKEN)
+    secret = os.environ.get("PRINT_SECRET", "KPR2024SECRET")
+    if request.headers.get("X-Print-Token", "") != secret:
+        return err("Unauthorized", 401)
+
+    data = request.get_json(silent=True)
+    if not data:
+        return err("No JSON body")
+
+    import json
+    with db_conn() as con:
+        con.execute(
+            "INSERT INTO print_queue (job_data, status) VALUES (?, 'pending')",
+            (json.dumps(data),)
+        )
+        job_id = con.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+
+    return ok({"job_id": job_id, "message": "Print job queued"})
+
+
+@app.get("/api/print-queue/pending")
+def get_pending_jobs():
+    """
+    Parking laptop polls this every 3 seconds.
+    Returns all unprinted jobs.
+    """
+    secret = os.environ.get("PRINT_SECRET", "KPR2024SECRET")
+    if request.headers.get("X-Print-Token", "") != secret:
+        return err("Unauthorized", 401)
+
+    import json
+    with db_conn() as con:
+        rows = con.execute(
+            "SELECT id, job_data, created_at FROM print_queue WHERE status='pending' ORDER BY id ASC"
+        ).fetchall()
+
+    jobs = []
+    for row in rows:
+        try:
+            jobs.append({
+                "id":         row["id"],
+                "data":       json.loads(row["job_data"]),
+                "created_at": row["created_at"]
+            })
+        except Exception:
+            pass
+
+    return ok(jobs)
+
+
+@app.route("/api/print-queue/<int:job_id>/ack", methods=["PATCH"])
+def ack_print_job(job_id: int):
+    """
+    Parking laptop calls this after successfully printing.
+    Marks the job as done so it won't be printed again.
+    """
+    secret = os.environ.get("PRINT_SECRET", "KPR2024SECRET")
+    if request.headers.get("X-Print-Token", "") != secret:
+        return err("Unauthorized", 401)
+
+    body   = request.get_json(silent=True) or {}
+    status = "done" if body.get("success", True) else "failed"
+
+    with db_conn() as con:
+        row = con.execute("SELECT id FROM print_queue WHERE id=?", (job_id,)).fetchone()
+        if not row:
+            return err("Job not found", 404)
+        con.execute(
+            "UPDATE print_queue SET status=?, ack_at=datetime('now') WHERE id=?",
+            (status, job_id)
+        )
+
+    return ok({"job_id": job_id, "status": status})
+
+
+@app.get("/api/print-queue")
+def list_print_queue():
+    """View all print jobs (last 100)."""
+    secret = os.environ.get("PRINT_SECRET", "KPR2024SECRET")
+    if request.headers.get("X-Print-Token", "") != secret:
+        return err("Unauthorized", 401)
+
+    import json
+    with db_conn() as con:
+        rows = con.execute(
+            "SELECT id, status, created_at, ack_at, job_data FROM print_queue ORDER BY id DESC LIMIT 100"
+        ).fetchall()
+
+    jobs = []
+    for row in rows:
+        try:
+            d = json.loads(row["job_data"])
+            jobs.append({
+                "id":         row["id"],
+                "status":     row["status"],
+                "created_at": row["created_at"],
+                "ack_at":     row["ack_at"],
+                "token":      d.get("token"),
+                "lorry":      d.get("lorry"),
+                "type":       d.get("type"),
+            })
+        except Exception:
+            pass
+
+    return ok(jobs)
+
+
+@app.delete("/api/print-queue/<int:job_id>")
+def delete_print_job(job_id: int):
+    """Delete a specific print job."""
+    secret = os.environ.get("PRINT_SECRET", "KPR2024SECRET")
+    if request.headers.get("X-Print-Token", "") != secret:
+        return err("Unauthorized", 401)
+
+    with db_conn() as con:
+        con.execute("DELETE FROM print_queue WHERE id=?", (job_id,))
+    return ok(message=f"Job {job_id} deleted")
+
+
+@app.delete("/api/print-queue")
+def clear_old_print_jobs():
+    """
+    Auto-cleanup: delete done/failed jobs older than 7 days.
+    Called automatically by the laptop poller.
+    """
+    secret = os.environ.get("PRINT_SECRET", "KPR2024SECRET")
+    if request.headers.get("X-Print-Token", "") != secret:
+        return err("Unauthorized", 401)
+
+    with db_conn() as con:
+        con.execute(
+            "DELETE FROM print_queue WHERE status != 'pending' AND created_at < datetime('now', '-7 days')"
+        )
+    return ok(message="Old jobs cleaned up")
+
+
 # ── Run ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print(f"✅  KPR Transport API running at http://localhost:{PORT}")
-    print(f"📁  Database: {DB_PATH}")
+    print(f"KPR Transport API running at http://localhost:{PORT}")
+    print(f"Database: {DB_PATH}")
+    print(f"Print Queue: enabled at /api/print-queue")
     app.run(host="0.0.0.0", port=PORT, debug=False)

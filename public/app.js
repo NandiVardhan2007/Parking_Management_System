@@ -13,7 +13,7 @@ const API = window.location.hostname === 'localhost' || window.location.hostname
 // To find it: Windows → open CMD → type "ipconfig" → look for IPv4 Address
 //             Linux/Mac → open Terminal → type "ip addr" or "ifconfig"
 // Both devices (phone/PC running the website + parking laptop) must be on the SAME WiFi.
-const PRINT_SERVER = 'http://192.168.1.10:5000';  // ← CHANGE THIS TO YOUR LAPTOP IP
+const PRINT_SERVER = 'http://192.168.1.3';  // ← CHANGE THIS TO YOUR LAPTOP IP
 const PRINT_SECRET = 'KPR2024SECRET';              // Must match print_server.py
 // ────────────────────────────────────────────────────────────
 

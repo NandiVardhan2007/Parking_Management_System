@@ -4,11 +4,18 @@
    ============================================================ */
 
 // ── API Config ──────────────────────────────────────────────
-// Change this to your server URL when deployed, e.g.:
-// const API = 'https://your-server.com/api';
 const API = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
   ? `http://${window.location.hostname}:3000/api`
   : `${window.location.origin}/api`;
+
+// ── PRINT SERVER CONFIG ─────────────────────────────────────
+// Change the IP below to your parking laptop's local IP address.
+// To find it: Windows → open CMD → type "ipconfig" → look for IPv4 Address
+//             Linux/Mac → open Terminal → type "ip addr" or "ifconfig"
+// Both devices (phone/PC running the website + parking laptop) must be on the SAME WiFi.
+const PRINT_SERVER = 'http://192.168.1.10:5000';  // ← CHANGE THIS TO YOUR LAPTOP IP
+const PRINT_SECRET = 'KPR2024SECRET';              // Must match print_server.py
+// ────────────────────────────────────────────────────────────
 
 // ── Data Store (local cache) ────────────────────────────────
 let db          = JSON.parse(localStorage.getItem('kpr_db')   || '[]');
@@ -41,7 +48,6 @@ async function syncFromServer() {
     saveLocal();
     backendOnline = true;
   } catch (_) {
-    // Backend offline — work from localStorage
     backendOnline = false;
     showOnlineStatus();
   }
@@ -128,10 +134,10 @@ function goTab(tab, btn) {
 
 // ── Notifications ────────────────────────────────────────────
 function notify(msg, type = 'info') {
-  const icons = { success: '✅', error: '❌', info: 'ℹ️' };
+  const icons = { success: '✅', error: '❌', info: 'ℹ️', warn: '⚠️' };
   const el    = document.createElement('div');
   el.className = 'toast ' + type;
-  el.innerHTML = `<span>${icons[type]}</span><span style="flex:1">${msg}</span>`;
+  el.innerHTML = `<span>${icons[type] || 'ℹ️'}</span><span style="flex:1">${msg}</span>`;
   document.getElementById('notifyWrap').appendChild(el);
   setTimeout(() => el.remove(), 3200);
 }
@@ -177,7 +183,6 @@ async function recordEntry() {
       return;
     }
   } else {
-    // Offline — write to local only
     const now   = new Date();
     const token = getNextToken();
     rec = {
@@ -308,7 +313,6 @@ async function processExit() {
       return;
     }
   } else {
-    // Offline fallback
     const days = calcDays(rec.entryISO, now.toISOString());
     const amt  = calcAmt(days);
     rec.exitISO     = now.toISOString();
@@ -325,6 +329,31 @@ async function processExit() {
   showExitReceipt(rec);
   clearExitForm();
   notify('Token #' + num + ' exited — Rs.' + rec.amount, 'success');
+}
+
+// ── AUTO PRINT — Send to parking laptop printer ───────────────
+async function sendToPrinter(data) {
+  try {
+    const resp = await fetch(`${PRINT_SERVER}/print`, {
+      method: 'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'X-Print-Token': PRINT_SECRET
+      },
+      body: JSON.stringify(data),
+      signal: AbortSignal.timeout(6000)
+    });
+    if (resp.ok) {
+      notify('🖨 Receipt sent to printer ✓', 'success');
+    } else {
+      console.warn('[KPR Print] Server responded with error:', resp.status);
+      notify('⚠ Printer server error (' + resp.status + ')', 'warn');
+    }
+  } catch (err) {
+    // Non-fatal — printer offline or laptop not reachable
+    console.warn('[KPR Print] Print server unreachable:', err.message);
+    notify('⚠ Printer offline — use browser print', 'warn');
+  }
 }
 
 // ── RECEIPTS ─────────────────────────────────────────────────
@@ -362,7 +391,22 @@ function showEntryReceipt(rec) {
       <p style="margin-top:4px">Thank you for choosing KPR Transport</p>
     </div>`;
 
+  // Store print data for the print button
+  window._lastReceiptData = {
+    type:       'entry',
+    token:      String(rec.token),
+    lorry:      rec.lorry,
+    driver:     rec.driver !== '--' ? rec.driver : '',
+    phone:      rec.phone  !== '--' ? rec.phone  : '',
+    remarks:    rec.remarks !== '--' ? rec.remarks : '',
+    entry_time: ed.toLocaleDateString('en-IN') + ' ' + ed.toLocaleTimeString('en-IN'),
+    rate:       dailyRate
+  };
+
   document.getElementById('receiptOv').classList.add('open');
+
+  // Auto-send to printer immediately when receipt appears
+  sendToPrinter(window._lastReceiptData);
 }
 
 function showExitReceipt(rec) {
@@ -403,15 +447,36 @@ function showExitReceipt(rec) {
       <p style="margin-top:4px">Thank you for using KPR Transport Parking</p>
     </div>`;
 
+  // Store print data for the print button
+  window._lastReceiptData = {
+    type:       'exit',
+    token:      String(rec.token),
+    lorry:      rec.lorry,
+    driver:     rec.driver  !== '--' ? rec.driver  : '',
+    phone:      rec.phone   !== '--' ? rec.phone   : '',
+    remarks:    rec.remarks !== '--' ? rec.remarks : '',
+    entry_time: ed.toLocaleDateString('en-IN') + ' ' + ed.toLocaleTimeString('en-IN'),
+    exit_time:  xd.toLocaleDateString('en-IN') + ' ' + xd.toLocaleTimeString('en-IN'),
+    duration:   rec.days + ' Day' + (rec.days > 1 ? 's' : ''),
+    days:       rec.days,
+    rate:       dailyRate,
+    amount:     rec.amount
+  };
+
   document.getElementById('receiptOv').classList.add('open');
+
+  // Auto-send to printer immediately when receipt appears
+  sendToPrinter(window._lastReceiptData);
 }
 
 function closeReceipt() {
   document.getElementById('receiptOv').classList.remove('open');
   document.getElementById('receiptOv').scrollTop = 0;
+  window._lastReceiptData = null;
 }
 
 function printReceipt() {
+  // Open browser print dialog (as backup / for manual reprint)
   const c = document.getElementById('receiptContent').innerHTML;
   const w = window.open('', '_blank', 'width=400,height=650');
   w.document.write(`<!DOCTYPE html><html><head><title>KPR Receipt</title>
@@ -435,6 +500,11 @@ function printReceipt() {
     </style></head><body>${c}</body></html>`);
   w.document.close();
   setTimeout(() => w.print(), 300);
+
+  // Also re-send to printer (in case it was missed on first auto-send)
+  if (window._lastReceiptData) {
+    sendToPrinter(window._lastReceiptData);
+  }
 }
 
 // ── RENDER: RECENTLY PARKED ───────────────────────────────────
@@ -667,7 +737,6 @@ function importExcel(event) {
       let added  = 0;
 
       if (backendOnline) {
-        // Send to server as bulk import
         const payload = rows.map(row => ({
           lorry:    (row['Lorry Number'] || row['lorry'] || '').toString(),
           driver:   row['Driver Name']   || row['driver']  || '--',
@@ -690,7 +759,6 @@ function importExcel(event) {
           st.textContent = `Imported ${added} records successfully!`;
         }
       } else {
-        // Offline fallback
         let nxt = getNextToken();
         rows.forEach(row => {
           const lorry = (row['Lorry Number'] || row['lorry'] || '').toString().toUpperCase().trim();
@@ -772,19 +840,16 @@ document.addEventListener('DOMContentLoaded', async function () {
   document.getElementById('dailyRateInput').value = dailyRate;
   document.getElementById('rateShow').textContent  = dailyRate;
 
-  // Initial render from localStorage (instant)
   updateStats();
   refreshToken();
   renderRecent();
 
-  // Then sync from server (fast update)
   await syncFromServer();
   showOnlineStatus();
   updateStats();
   refreshToken();
   renderRecent();
 
-  // Recheck server connection every 30s
   setInterval(async () => {
     await syncFromServer();
     showOnlineStatus();

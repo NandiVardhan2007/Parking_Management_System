@@ -2,30 +2,14 @@
 #  KPR TRANSPORT PARKING SYSTEM — Python Backend
 #  server.py  |  Flask + SQLite
 #
-#  Endpoints (original):
-#    GET    /api/health
-#    GET    /api/stats
-#    GET    /api/settings
-#    POST   /api/settings
-#    GET    /api/records
-#    GET    /api/records/<id>
-#    POST   /api/records
-#    PATCH  /api/records/<id>/exit
-#    DELETE /api/records/<id>
-#    DELETE /api/records
-#    POST   /api/import
-#
-#  NEW — Print Queue endpoints:
-#    POST   /api/print-queue          ← website adds a print job
-#    GET    /api/print-queue/pending  ← laptop polls for new jobs
-#    PATCH  /api/print-queue/<id>/ack ← laptop marks job as done
-#    GET    /api/print-queue          ← view all jobs (admin)
-#    DELETE /api/print-queue/<id>     ← delete a job
+#  IMPROVED VERSION:
+#  - Date-only billing (no time component)
+#  - Entry 14th Feb, Exit 18th Feb = 4 days (not 5)
+#  - Enhanced error handling
 # ================================================================
 
 import os
 import sqlite3
-import math
 import datetime
 from contextlib import contextmanager
 from pathlib import Path
@@ -74,9 +58,9 @@ def init_db():
                 driver        TEXT    NOT NULL DEFAULT '--',
                 phone         TEXT    NOT NULL DEFAULT '--',
                 remarks       TEXT    NOT NULL DEFAULT '--',
-                entry_iso     TEXT    NOT NULL,
+                entry_date    TEXT    NOT NULL,
                 entry_display TEXT    NOT NULL,
-                exit_iso      TEXT,
+                exit_date     TEXT,
                 exit_display  TEXT    DEFAULT '--',
                 days          INTEGER,
                 amount        REAL,
@@ -102,8 +86,8 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_status    ON records(status);
             CREATE INDEX IF NOT EXISTS idx_lorry     ON records(lorry);
             CREATE INDEX IF NOT EXISTS idx_token     ON records(token);
-            CREATE INDEX IF NOT EXISTS idx_entry     ON records(entry_iso);
-            CREATE INDEX IF NOT EXISTS idx_exit      ON records(exit_iso);
+            CREATE INDEX IF NOT EXISTS idx_entry     ON records(entry_date);
+            CREATE INDEX IF NOT EXISTS idx_exit      ON records(exit_date);
             CREATE INDEX IF NOT EXISTS idx_pq_status ON print_queue(status);
 
             INSERT OR IGNORE INTO settings(key, value) VALUES ('daily_rate', '120');
@@ -123,9 +107,9 @@ def row_to_dict(row) -> dict | None:
         "driver":       r["driver"],
         "phone":        r["phone"],
         "remarks":      r["remarks"],
-        "entryISO":     r["entry_iso"],
+        "entryDate":    r["entry_date"],
         "entryDisplay": r["entry_display"],
-        "exitISO":      r["exit_iso"],
+        "exitDate":     r["exit_date"],
         "exitDisplay":  r["exit_display"] or "--",
         "days":         r["days"],
         "amount":       r["amount"],
@@ -137,21 +121,36 @@ def get_rate(con: sqlite3.Connection) -> float:
     row = con.execute("SELECT value FROM settings WHERE key='daily_rate'").fetchone()
     return float(row["value"]) if row else 120.0
 
-def calc_days(entry_iso: str, exit_iso: str) -> int:
-    entry = datetime.datetime.fromisoformat(entry_iso.replace("Z", "+00:00"))
-    exit_ = datetime.datetime.fromisoformat(exit_iso.replace("Z", "+00:00"))
-    diff  = (exit_ - entry).total_seconds()
-    if diff <= 0:
+def calc_days(entry_date: str, exit_date: str) -> int:
+    """
+    Calculate parking days using DATE ONLY (not time).
+    Entry: 2025-02-14, Exit: 2025-02-18 → 4 days
+    Formula: exit_date - entry_date
+    """
+    try:
+        # Parse dates (format: YYYY-MM-DD)
+        entry = datetime.datetime.strptime(entry_date[:10], "%Y-%m-%d").date()
+        exit_ = datetime.datetime.strptime(exit_date[:10], "%Y-%m-%d").date()
+        
+        # Calculate difference in days
+        diff_days = (exit_ - entry).days
+        
+        # Minimum 1 day (same day entry/exit = 1 day)
+        return max(1, diff_days) if diff_days > 0 else 1
+    except Exception:
         return 1
-    return max(1, math.ceil(diff / 86400))
 
-def now_iso() -> str:
-    return datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
+def today_date() -> str:
+    """Return today's date in YYYY-MM-DD format"""
+    return datetime.date.today().strftime("%Y-%m-%d")
 
-def fmt_display(iso: str) -> str:
-    dt  = datetime.datetime.fromisoformat(iso.replace("Z", "+00:00"))
-    ist = dt + datetime.timedelta(hours=5, minutes=30)
-    return ist.strftime("%-d/%-m/%Y, %-I:%M:%S %p")
+def fmt_display(date_str: str) -> str:
+    """Format date for display: DD/MM/YYYY"""
+    try:
+        dt = datetime.datetime.strptime(date_str[:10], "%Y-%m-%d")
+        return dt.strftime("%d/%m/%Y")
+    except Exception:
+        return date_str
 
 def next_token(con: sqlite3.Connection) -> int:
     row = con.execute("SELECT COALESCE(MAX(token), 0) + 1 AS nxt FROM records").fetchone()
@@ -176,26 +175,26 @@ if PUBLIC.exists():
             return send_from_directory(str(PUBLIC), path)
         return send_from_directory(str(PUBLIC), "index.html")
 
-# ── Original Routes ───────────────────────────────────────────────
+# ── Routes ───────────────────────────────────────────────────────
 
 @app.get("/api/health")
 def health():
-    return ok(db=DB_PATH, timestamp=now_iso())
+    return ok(db=DB_PATH, timestamp=datetime.datetime.utcnow().isoformat())
 
 
 @app.get("/api/stats")
 def stats():
-    today = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+    today = today_date()
     with db_conn() as con:
         row = con.execute("""
             SELECT
-                SUM(CASE WHEN status='IN'  THEN 1 ELSE 0 END)                                              AS parked,
-                SUM(CASE WHEN date(entry_iso)=?    THEN 1 ELSE 0 END)                                      AS today_entries,
-                SUM(CASE WHEN status='OUT' AND exit_iso IS NOT NULL AND date(exit_iso)=? THEN 1 ELSE 0 END) AS today_exits,
-                SUM(CASE WHEN status='OUT' AND exit_iso IS NOT NULL AND date(exit_iso)=? THEN amount ELSE 0 END) AS today_revenue,
-                COUNT(*)                                                                                     AS total,
-                SUM(CASE WHEN status='OUT' THEN 1 ELSE 0 END)                                              AS exited,
-                SUM(CASE WHEN status='OUT' THEN amount ELSE 0 END)                                         AS total_revenue
+                SUM(CASE WHEN status='IN'  THEN 1 ELSE 0 END)                                AS parked,
+                SUM(CASE WHEN entry_date=? THEN 1 ELSE 0 END)                                AS today_entries,
+                SUM(CASE WHEN status='OUT' AND exit_date=? THEN 1 ELSE 0 END)                AS today_exits,
+                SUM(CASE WHEN status='OUT' AND exit_date=? THEN amount ELSE 0 END)           AS today_revenue,
+                COUNT(*)                                                                      AS total,
+                SUM(CASE WHEN status='OUT' THEN 1 ELSE 0 END)                                AS exited,
+                SUM(CASE WHEN status='OUT' THEN amount ELSE 0 END)                           AS total_revenue
             FROM records
         """, (today, today, today)).fetchone()
     return ok(dict(row))
@@ -225,50 +224,37 @@ def post_settings():
 
 
 @app.get("/api/records")
-def list_records():
-    status = request.args.get("status", "").upper()
+def get_records():
     q      = request.args.get("q", "").strip()
-    page   = max(1, int(request.args.get("page",  1)))
-    limit  = max(1, int(request.args.get("limit", 200)))
+    status = request.args.get("status", "").strip().upper()
+    page   = int(request.args.get("page",  "1"))
+    limit  = int(request.args.get("limit", "200"))
     offset = (page - 1) * limit
 
-    where  = ["1=1"]
-    params = []
-
-    if status and status != "ALL":
-        where.append("status = ?")
-        params.append(status)
-
-    if q:
-        where.append("(lorry LIKE ? OR driver LIKE ? OR CAST(token AS TEXT) LIKE ?)")
-        like = f"%{q}%"
-        params.extend([like, like, like])
-
-    clause = " AND ".join(where)
-
     with db_conn() as con:
-        total = con.execute(
-            f"SELECT COUNT(*) AS c FROM records WHERE {clause}", params
-        ).fetchone()["c"]
+        sql = "SELECT * FROM records WHERE 1=1"
+        params = []
 
-        rows = con.execute(
-            f"SELECT * FROM records WHERE {clause} ORDER BY token DESC LIMIT ? OFFSET ?",
-            params + [limit, offset]
-        ).fetchall()
+        if status in ("IN", "OUT"):
+            sql += " AND status = ?"
+            params.append(status)
+        if q:
+            sql += " AND (lorry LIKE ? OR driver LIKE ? OR CAST(token AS TEXT) LIKE ?)"
+            qp = f"%{q}%"
+            params.extend([qp, qp, qp])
 
-    return jsonify({
-        "ok":    True,
-        "total": total,
-        "page":  page,
-        "limit": limit,
-        "data":  [row_to_dict(r) for r in rows],
-    })
+        sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        rows = con.execute(sql, params).fetchall()
+
+    return ok([row_to_dict(r) for r in rows])
 
 
-@app.get("/api/records/<int:record_id>")
-def get_record(record_id: int):
+@app.get("/api/records/<int:rec_id>")
+def get_record(rec_id: int):
     with db_conn() as con:
-        row = con.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone()
+        row = con.execute("SELECT * FROM records WHERE id=?", (rec_id,)).fetchone()
     if not row:
         return err("Record not found", 404)
     return ok(row_to_dict(row))
@@ -276,94 +262,94 @@ def get_record(record_id: int):
 
 @app.post("/api/records")
 def create_record():
-    body  = request.get_json(silent=True) or {}
+    body = request.get_json(silent=True) or {}
     lorry = (body.get("lorry") or "").strip().upper()
     if not lorry:
-        return err("lorry is required")
+        return err("Lorry number required")
 
+    entry_date = body.get("entryDate") or today_date()
+    
     with db_conn() as con:
+        # Check for duplicate parked vehicle
         dup = con.execute(
-            "SELECT token FROM records WHERE lorry=? COLLATE NOCASE AND status='IN'",
-            (lorry,)
+            "SELECT token FROM records WHERE lorry=? AND status='IN'", (lorry,)
         ).fetchone()
         if dup:
-            return err(f"{lorry} is already parked (Token #{dup['token']})", 409)
+            return err(f"{lorry} is already parked with token #{dup['token']}", 409)
 
-        entry_iso     = body.get("entryISO") or now_iso()
-        entry_display = fmt_display(entry_iso)
-        token         = next_token(con)
-
+        token = next_token(con)
         con.execute("""
             INSERT INTO records
-                (token, lorry, driver, phone, remarks, entry_iso, entry_display, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'IN')
+                (token, lorry, driver, phone, remarks, entry_date, entry_display, status)
+            VALUES (?,?,?,?,?, ?,?, 'IN')
         """, (
             token,
             lorry,
-            (body.get("driver")  or "").strip() or "--",
-            (body.get("phone")   or "").strip() or "--",
-            (body.get("remarks") or "").strip() or "--",
-            entry_iso,
-            entry_display,
+            (body.get("driver")  or "--").strip() or "--",
+            (body.get("phone")   or "--").strip() or "--",
+            (body.get("remarks") or "--").strip() or "--",
+            entry_date,
+            fmt_display(entry_date)
         ))
-        new_row = con.execute("SELECT * FROM records WHERE token=?", (token,)).fetchone()
+        row = con.execute("SELECT * FROM records WHERE token=?", (token,)).fetchone()
 
-    return ok(row_to_dict(new_row)), 201
+    return ok(row_to_dict(row), message=f"Entry recorded: Token #{token}")
 
 
-@app.route("/api/records/<int:record_id>/exit", methods=["PATCH"])
-def process_exit(record_id: int):
+@app.patch("/api/records/<int:rec_id>/exit")
+def exit_record(rec_id: int):
     body = request.get_json(silent=True) or {}
+    exit_date = body.get("exitDate") or today_date()
 
     with db_conn() as con:
-        row = con.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone()
+        row = con.execute("SELECT * FROM records WHERE id=?", (rec_id,)).fetchone()
         if not row:
             return err("Record not found", 404)
         if row["status"] == "OUT":
-            return err(f"Token #{row['token']} already exited", 409)
+            return err("Vehicle already exited", 400)
 
-        rate     = float(body.get("rate") or get_rate(con))
-        exit_iso = body.get("exitISO") or now_iso()
-        days     = calc_days(row["entry_iso"], exit_iso)
-        amount   = days * rate
+        entry_date = row["entry_date"]
+        days = calc_days(entry_date, exit_date)
+        rate = get_rate(con)
+        amount = days * rate
 
         con.execute("""
             UPDATE records
-            SET exit_iso=?, exit_display=?, days=?, amount=?, status='OUT'
-            WHERE id=? AND status='IN'
-        """, (exit_iso, fmt_display(exit_iso), days, amount, record_id))
+            SET exit_date=?, exit_display=?, days=?, amount=?, status='OUT'
+            WHERE id=?
+        """, (exit_date, fmt_display(exit_date), days, amount, rec_id))
 
-        updated = con.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone()
+        updated = con.execute("SELECT * FROM records WHERE id=?", (rec_id,)).fetchone()
 
-    return ok(row_to_dict(updated))
+    return ok(row_to_dict(updated), message=f"Exit processed: {days} days, Rs.{amount}")
 
 
-@app.delete("/api/records/<int:record_id>")
-def delete_record(record_id: int):
+@app.delete("/api/records/<int:rec_id>")
+def delete_record(rec_id: int):
     with db_conn() as con:
-        row = con.execute("SELECT id FROM records WHERE id=?", (record_id,)).fetchone()
+        row = con.execute("SELECT id FROM records WHERE id=?", (rec_id,)).fetchone()
         if not row:
             return err("Record not found", 404)
-        con.execute("DELETE FROM records WHERE id=?", (record_id,))
-    return ok(message=f"Record {record_id} deleted")
+        con.execute("DELETE FROM records WHERE id=?", (rec_id,))
+    return ok(message=f"Record {rec_id} deleted")
 
 
 @app.delete("/api/records")
 def delete_all_records():
     body = request.get_json(silent=True) or {}
     if body.get("confirm") != "DELETE_ALL":
-        return err('Send {"confirm": "DELETE_ALL"} to confirm')
+        return err("Confirmation required")
     with db_conn() as con:
         con.execute("DELETE FROM records")
     return ok(message="All records deleted")
 
 
 @app.post("/api/import")
-def bulk_import():
-    body    = request.get_json(silent=True) or {}
-    records = body.get("records")
-    if not isinstance(records, list):
-        return err("records array required")
+def import_records():
+    body = request.get_json(silent=True) or {}
+    records = body.get("records", [])
+    if not records:
+        return err("No records provided")
 
     added  = 0
     errors = []
@@ -377,11 +363,11 @@ def bulk_import():
                 if not lorry:
                     raise ValueError("Missing lorry")
 
-                entry_iso = r.get("entryISO") or now_iso()
-                exit_iso  = r.get("exitISO")  or None
-                status    = "OUT" if exit_iso else "IN"
-                days      = calc_days(entry_iso, exit_iso) if exit_iso else None
-                amount    = days * rate if days else None
+                entry_date = r.get("entryDate") or today_date()
+                exit_date  = r.get("exitDate")  or None
+                status     = "OUT" if exit_date else "IN"
+                days       = calc_days(entry_date, exit_date) if exit_date else None
+                amount     = days * rate if days else None
 
                 token = int(r["token"]) if r.get("token") else None
                 if token:
@@ -397,8 +383,8 @@ def bulk_import():
                 con.execute("""
                     INSERT INTO records
                         (token, lorry, driver, phone, remarks,
-                         entry_iso, entry_display,
-                         exit_iso, exit_display,
+                         entry_date, entry_display,
+                         exit_date, exit_display,
                          days, amount, status)
                     VALUES (?,?,?,?,?, ?,?, ?,?, ?,?,?)
                 """, (
@@ -407,10 +393,10 @@ def bulk_import():
                     (r.get("driver")  or "--").strip() or "--",
                     (r.get("phone")   or "--").strip() or "--",
                     (r.get("remarks") or "--").strip() or "--",
-                    entry_iso,
-                    fmt_display(entry_iso),
-                    exit_iso,
-                    fmt_display(exit_iso) if exit_iso else "--",
+                    entry_date,
+                    fmt_display(entry_date),
+                    exit_date,
+                    fmt_display(exit_date) if exit_date else "--",
                     days,
                     amount,
                     status,
@@ -431,27 +417,11 @@ def bulk_import():
 
 
 # ================================================================
-#  PRINT QUEUE — New endpoints
-# ================================================================
-#
-#  How it works:
-#  1. Website clicks Print → POST /api/print-queue  (saves job to DB)
-#  2. Parking laptop runs print_server.py which polls every 3 seconds:
-#       GET /api/print-queue/pending  → gets new jobs
-#  3. Laptop prints receipt silently
-#  4. Laptop confirms:
-#       PATCH /api/print-queue/<id>/ack  → marks job done
-#
-#  No tunnels. No port forwarding. Works from anywhere.
+#  PRINT QUEUE — Print endpoints
 # ================================================================
 
 @app.post("/api/print-queue")
 def enqueue_print():
-    """
-    Website calls this when user clicks Print.
-    Saves the receipt data into the queue.
-    """
-    # Optional secret check (uses same secret as config.ini SECRET_TOKEN)
     secret = os.environ.get("PRINT_SECRET", "KPR2024SECRET")
     if request.headers.get("X-Print-Token", "") != secret:
         return err("Unauthorized", 401)
@@ -473,10 +443,6 @@ def enqueue_print():
 
 @app.get("/api/print-queue/pending")
 def get_pending_jobs():
-    """
-    Parking laptop polls this every 3 seconds.
-    Returns all unprinted jobs.
-    """
     secret = os.environ.get("PRINT_SECRET", "KPR2024SECRET")
     if request.headers.get("X-Print-Token", "") != secret:
         return err("Unauthorized", 401)
@@ -503,10 +469,6 @@ def get_pending_jobs():
 
 @app.route("/api/print-queue/<int:job_id>/ack", methods=["PATCH"])
 def ack_print_job(job_id: int):
-    """
-    Parking laptop calls this after successfully printing.
-    Marks the job as done so it won't be printed again.
-    """
     secret = os.environ.get("PRINT_SECRET", "KPR2024SECRET")
     if request.headers.get("X-Print-Token", "") != secret:
         return err("Unauthorized", 401)
@@ -528,7 +490,6 @@ def ack_print_job(job_id: int):
 
 @app.get("/api/print-queue")
 def list_print_queue():
-    """View all print jobs (last 100)."""
     secret = os.environ.get("PRINT_SECRET", "KPR2024SECRET")
     if request.headers.get("X-Print-Token", "") != secret:
         return err("Unauthorized", 401)
@@ -560,7 +521,6 @@ def list_print_queue():
 
 @app.delete("/api/print-queue/<int:job_id>")
 def delete_print_job(job_id: int):
-    """Delete a specific print job."""
     secret = os.environ.get("PRINT_SECRET", "KPR2024SECRET")
     if request.headers.get("X-Print-Token", "") != secret:
         return err("Unauthorized", 401)
@@ -572,10 +532,6 @@ def delete_print_job(job_id: int):
 
 @app.delete("/api/print-queue")
 def clear_old_print_jobs():
-    """
-    Auto-cleanup: delete done/failed jobs older than 7 days.
-    Called automatically by the laptop poller.
-    """
     secret = os.environ.get("PRINT_SECRET", "KPR2024SECRET")
     if request.headers.get("X-Print-Token", "") != secret:
         return err("Unauthorized", 401)
@@ -589,7 +545,8 @@ def clear_old_print_jobs():
 
 # ── Run ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    print(f"KPR Transport API running at http://localhost:{PORT}")
-    print(f"Database: {DB_PATH}")
-    print(f"Print Queue: enabled at /api/print-queue")
+    print(f"🚛 KPR Transport API running at http://localhost:{PORT}")
+    print(f"📁 Database: {DB_PATH}")
+    print(f"📅 Billing: DATE-ONLY calculation (14th-18th = 4 days)")
+    print(f"🖨️  Print Queue: enabled")
     app.run(host="0.0.0.0", port=PORT, debug=False)

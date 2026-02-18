@@ -81,15 +81,13 @@
           oninput="this.value=this.value.toUpperCase()">
       </div>
 
-      <div class="row2">
-        <div class="fg">
-          <label>Entry Date</label>
-          <input type="text" id="entryDate" readonly>
-        </div>
-        <div class="fg">
-          <label>Entry Time</label>
-          <input type="text" id="entryTime" readonly>
-        </div>
+      <div class="fg">
+        <label>Entry Date * 📅</label>
+        <input 
+          type="date" 
+          id="entryDateInput" 
+          class="inp-date"
+          required>
       </div>
 
       <div class="fg">
@@ -139,15 +137,14 @@
         </div>
       </div>
 
-      <div class="row2" style="margin-bottom:14px">
-        <div class="fg" style="margin-bottom:0">
-          <label>Exit Date</label>
-          <input type="text" id="exitDate" readonly>
-        </div>
-        <div class="fg" style="margin-bottom:0">
-          <label>Exit Time</label>
-          <input type="text" id="exitTime" readonly style="color:#ef4444">
-        </div>
+      <div class="fg">
+        <label>Exit Date * 📅</label>
+        <input 
+          type="date" 
+          id="exitDateInput" 
+          class="inp-date"
+          required
+          onchange="if(document.getElementById('exitToken').value) lookupToken(document.getElementById('exitToken').value)">
       </div>
 
       <!-- Error box -->
@@ -242,8 +239,9 @@
           onchange="saveRate()">
       </div>
       <div style="background:#12161e;border-radius:10px;padding:12px;font-size:12px;color:#5a6a80;line-height:1.9;text-align:center">
-        Billing: <span style="color:#e8edf5;font-family:'Share Tech Mono',monospace">Days x Rs.<span id="rateShow">120</span>/day</span><br>
-        Partial days are counted as full days
+        📅 <span style="color:#e8edf5;font-family:'Share Tech Mono',monospace">DATE-ONLY billing</span><br>
+        Entry 14th Feb → Exit 18th Feb = <span style="color:#22c55e;font-weight:bold">4 days</span><br>
+        Amount: Days × Rs.<span id="rateShow">120</span>/day
       </div>
     </div>
 
@@ -253,7 +251,7 @@
       <div class="io-title">Import from Excel</div>
       <div class="io-desc">
         Upload an Excel (.xlsx / .xls) or CSV file.<br>
-        Columns: Lorry Number, Driver Name, Driver Phone, Entry DateTime, Exit DateTime, Remarks
+        Columns: Lorry Number, Driver Name, Driver Phone, Entry Date, Exit Date, Remarks
       </div>
       <label class="file-drop" id="dropZone">
         <input type="file" id="importFile" accept=".xlsx,.xls,.csv" onchange="importExcel(event)">
@@ -269,7 +267,7 @@
       <div class="io-ico">📤</div>
       <div class="io-title">Export to Excel</div>
       <div class="io-desc">
-        Download records with Token, Lorry, Driver, Phone, Entry/Exit times, Duration and Amount.
+        Download records with Token, Lorry, Driver, Phone, Entry/Exit dates, Duration and Amount.
       </div>
       <button class="btn btn-success" onclick="exportExcel('all')">📊 Export All Records</button>
       <button class="btn btn-ghost"   onclick="exportExcel('in')">🅿 Export Parked Only</button>

@@ -1,6 +1,11 @@
 /* ============================================================
    KPR TRANSPORT - PARKING MANAGEMENT SYSTEM
-   app.js  —  API-first with localStorage offline fallback
+   app.js  —  IMPROVED VERSION with DATE-ONLY billing
+   
+   IMPROVEMENTS:
+   - Date pickers for entry/exit (defaults to today)
+   - Date-only billing: 14th Feb to 18th Feb = 4 days
+   - Better UX and error handling
    ============================================================ */
 
 // ── API Config ──────────────────────────────────────────────
@@ -8,19 +13,12 @@ const API = window.location.hostname === 'localhost' || window.location.hostname
   ? `http://${window.location.hostname}:3000/api`
   : `${window.location.origin}/api`;
 
-// Change the IP below to your parking laptop's local IP address.
-// ── PRINT CONFIG ─────────────────────────────────────────────────
-// Print jobs go to Render queue → parking laptop polls & prints silently.
-// Must match SECRET_TOKEN in config.ini on the parking laptop.
 const PRINT_SECRET = 'KPR2024SECRET';
-// ─────────────────────────────────────────────────────────────────
 
 // ── Data Store (local cache) ────────────────────────────────
 let db          = JSON.parse(localStorage.getItem('kpr_db')   || '[]');
 let dailyRate   = parseInt(localStorage.getItem('kpr_rate')   || '120');
 let recFilterStatus = 'all';
-
-// Track whether backend is reachable
 let backendOnline = false;
 
 // ── Sync helpers ─────────────────────────────────────────────
@@ -34,7 +32,6 @@ async function apiFetch(path, opts = {}) {
   return json;
 }
 
-// Sync from backend into local cache
 async function syncFromServer() {
   try {
     const [records, settings] = await Promise.all([
@@ -98,25 +95,31 @@ async function saveRate() {
   }
 }
 
-// ── Clock ────────────────────────────────────────────────────
+// ── Clock & Date/Time Initialization ─────────────────────────
 function tick() {
   const now = new Date();
   document.getElementById('clockTime').textContent =
     now.toLocaleTimeString('en-IN', { hour12: true });
   document.getElementById('clockDate').textContent =
     now.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
-
-  const d = now.toLocaleDateString('en-IN');
-  const t = now.toLocaleTimeString('en-IN', { hour12: true });
-  ['entryDate', 'exitDate'].forEach(id => {
-    const e = document.getElementById(id); if (e) e.value = d;
-  });
-  ['entryTime', 'exitTime'].forEach(id => {
-    const e = document.getElementById(id); if (e) e.value = t;
-  });
 }
 setInterval(tick, 1000);
 tick();
+
+// Initialize date inputs with today's date
+function initDateInputs() {
+  const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+  
+  const entryDateInput = document.getElementById('entryDateInput');
+  const exitDateInput = document.getElementById('exitDateInput');
+  
+  if (entryDateInput && !entryDateInput.value) {
+    entryDateInput.value = today;
+  }
+  if (exitDateInput && !exitDateInput.value) {
+    exitDateInput.value = today;
+  }
+}
 
 // ── Navigation ───────────────────────────────────────────────
 function goTab(tab, btn) {
@@ -125,7 +128,7 @@ function goTab(tab, btn) {
   document.getElementById('panel-' + tab).classList.add('active');
   btn.classList.add('active');
   document.getElementById('appBody').scrollTop = 0;
-  if (tab === 'exit')    renderParked();
+  if (tab === 'exit')    { renderParked(); initDateInputs(); }
   if (tab === 'records') renderRecords();
   updateStats();
 }
@@ -140,11 +143,21 @@ function notify(msg, type = 'info') {
   setTimeout(() => el.remove(), 3200);
 }
 
-// ── Calculations ─────────────────────────────────────────────
-function calcDays(entryISO, exitISO) {
-  const diff = new Date(exitISO) - new Date(entryISO);
-  if (diff <= 0) return 1;
-  return Math.max(1, Math.ceil(diff / 86400000));
+// ── Calculations (DATE-ONLY, no time) ────────────────────────
+function calcDays(entryDate, exitDate) {
+  /**
+   * DATE-ONLY calculation:
+   * Entry: 2025-02-14, Exit: 2025-02-18 → 4 days (18 - 14 = 4)
+   */
+  try {
+    const entry = new Date(entryDate.split('T')[0]); // Take only date part
+    const exit  = new Date(exitDate.split('T')[0]);
+    
+    const diffDays = Math.round((exit - entry) / 86400000);
+    return Math.max(1, diffDays); // Minimum 1 day
+  } catch(e) {
+    return 1;
+  }
 }
 function calcAmt(days) { return days * dailyRate; }
 
@@ -157,12 +170,14 @@ async function recordEntry() {
   const dup = db.find(r => r.lorry === lorry && r.status === 'IN');
   if (dup) { notify('WARNING: ' + lorry + ' already parked! Token #' + dup.token, 'error'); return; }
 
+  const entryDate = document.getElementById('entryDateInput').value;
+
   const payload = {
     lorry,
-    driver:  document.getElementById('entryDriver').value.trim()  || '--',
-    phone:   document.getElementById('entryPhone').value.trim()   || '--',
-    remarks: document.getElementById('entryRemarks').value.trim() || '--',
-    entryISO: new Date().toISOString()
+    driver:    document.getElementById('entryDriver').value.trim()  || '--',
+    phone:     document.getElementById('entryPhone').value.trim()   || '--',
+    remarks:   document.getElementById('entryRemarks').value.trim() || '--',
+    entryDate: entryDate
   };
 
   let rec;
@@ -181,7 +196,6 @@ async function recordEntry() {
       return;
     }
   } else {
-    const now   = new Date();
     const token = getNextToken();
     rec = {
       id:           Date.now(),
@@ -190,9 +204,9 @@ async function recordEntry() {
       driver:       payload.driver,
       phone:        payload.phone,
       remarks:      payload.remarks,
-      entryISO:     now.toISOString(),
-      entryDisplay: now.toLocaleString('en-IN'),
-      exitISO:      null,
+      entryDate:    entryDate,
+      entryDisplay: formatDate(entryDate),
+      exitDate:     null,
       exitDisplay:  '--',
       days:         null,
       amount:       null,
@@ -213,6 +227,7 @@ function clearEntry() {
   ['entryLorry', 'entryDriver', 'entryPhone', 'entryRemarks'].forEach(id => {
     document.getElementById(id).value = '';
   });
+  initDateInputs(); // Reset to today
 }
 
 // ── EXIT — LOOKUP ────────────────────────────────────────────
@@ -239,8 +254,8 @@ function lookupToken(val) {
     return;
   }
 
-  const now  = new Date();
-  const days = calcDays(rec.entryISO, now.toISOString());
+  const exitDate = document.getElementById('exitDateInput').value;
+  const days = calcDays(rec.entryDate, exitDate);
   const amt  = calcAmt(days);
 
   document.getElementById('lkToken').textContent = '#' + rec.token;
@@ -256,8 +271,7 @@ function lookupToken(val) {
   document.getElementById('lkDetails').innerHTML =
     `<div class="di"><div class="di-lbl">Driver</div><div class="di-val">${rec.driver}</div></div>` +
     phoneRow +
-    `<div class="di"><div class="di-lbl">Entry Date</div><div class="di-val">${new Date(rec.entryISO).toLocaleDateString('en-IN')}</div></div>` +
-    `<div class="di"><div class="di-lbl">Entry Time</div><div class="di-val">${new Date(rec.entryISO).toLocaleTimeString('en-IN')}</div></div>` +
+    `<div class="di"><div class="di-lbl">Entry Date</div><div class="di-val">${formatDate(rec.entryDate)}</div></div>` +
     remarkRow;
 
   document.getElementById('lkAmount').textContent = 'Rs.' + amt.toLocaleString('en-IN');
@@ -269,6 +283,7 @@ function clearExitForm() {
   document.getElementById('exitToken').value           = '';
   document.getElementById('exitError').style.display   = 'none';
   document.getElementById('lookupCard').style.display  = 'none';
+  initDateInputs();
 }
 
 // ── EXIT — PROCESS ───────────────────────────────────────────
@@ -294,14 +309,14 @@ async function processExit() {
     return;
   }
 
-  const now = new Date();
-  let rec   = db[idx];
+  const exitDate = document.getElementById('exitDateInput').value;
+  let rec = db[idx];
 
   if (backendOnline) {
     try {
       const resp = await apiFetch(`/records/${rec.id}/exit`, {
         method: 'PATCH',
-        body:   JSON.stringify({ rate: dailyRate, exitISO: now.toISOString() })
+        body:   JSON.stringify({ exitDate: exitDate })
       });
       db[idx] = resp.data;
       rec     = resp.data;
@@ -311,10 +326,10 @@ async function processExit() {
       return;
     }
   } else {
-    const days = calcDays(rec.entryISO, now.toISOString());
+    const days = calcDays(rec.entryDate, exitDate);
     const amt  = calcAmt(days);
-    rec.exitISO     = now.toISOString();
-    rec.exitDisplay = now.toLocaleString('en-IN');
+    rec.exitDate    = exitDate;
+    rec.exitDisplay = formatDate(exitDate);
     rec.days        = days;
     rec.amount      = amt;
     rec.status      = 'OUT';
@@ -329,9 +344,17 @@ async function processExit() {
   notify('Token #' + num + ' exited — Rs.' + rec.amount, 'success');
 }
 
-// ── AUTO PRINT — Queue job on Render server ──────────────────
-// The parking laptop polls the Render server every 3 seconds,
-// picks up jobs, and prints them silently — no tunnels needed!
+// ── Helper: Format date for display ──────────────────────────
+function formatDate(dateStr) {
+  try {
+    const d = new Date(dateStr);
+    return d.toLocaleDateString('en-IN');
+  } catch (e) {
+    return dateStr;
+  }
+}
+
+// ── AUTO PRINT — Queue job on server ─────────────────────────
 async function sendToPrinter(data) {
   try {
     const resp = await fetch(`${API}/print-queue`, {
@@ -359,7 +382,6 @@ async function sendToPrinter(data) {
 
 // ── RECEIPTS ─────────────────────────────────────────────────
 function showEntryReceipt(rec) {
-  const ed         = new Date(rec.entryISO);
   const phoneRow   = rec.phone   !== '--' ? `<div class="rr"><span>Phone</span><span>${rec.phone}</span></div>`   : '';
   const remarkRow  = rec.remarks !== '--' ? `<div class="rr"><span>Remarks</span><span>${rec.remarks}</span></div>` : '';
 
@@ -380,8 +402,7 @@ function showEntryReceipt(rec) {
       ${phoneRow}${remarkRow}
     </div>
     <div class="rs"><h3>Entry Details</h3>
-      <div class="rr"><span>Date</span><span>${ed.toLocaleDateString('en-IN')}</span></div>
-      <div class="rr"><span>Time</span><span>${ed.toLocaleTimeString('en-IN')}</span></div>
+      <div class="rr"><span>Date</span><span>${formatDate(rec.entryDate)}</span></div>
     </div>
     <div class="rs"><h3>Billing Info</h3>
       <div class="rr"><span>Rate / Day</span><span>Rs.${dailyRate}.00</span></div>
@@ -392,7 +413,6 @@ function showEntryReceipt(rec) {
       <p style="margin-top:4px">Thank you for choosing KPR Transport</p>
     </div>`;
 
-  // Store print data for the print button
   window._lastReceiptData = {
     type:       'entry',
     token:      String(rec.token),
@@ -400,19 +420,15 @@ function showEntryReceipt(rec) {
     driver:     rec.driver !== '--' ? rec.driver : '',
     phone:      rec.phone  !== '--' ? rec.phone  : '',
     remarks:    rec.remarks !== '--' ? rec.remarks : '',
-    entry_time: ed.toLocaleDateString('en-IN') + ' ' + ed.toLocaleTimeString('en-IN'),
+    entry_date: formatDate(rec.entryDate),
     rate:       dailyRate
   };
 
   document.getElementById('receiptOv').classList.add('open');
-
-  // Auto-send to printer immediately when receipt appears
   sendToPrinter(window._lastReceiptData);
 }
 
 function showExitReceipt(rec) {
-  const ed        = new Date(rec.entryISO);
-  const xd        = new Date(rec.exitISO);
   const phoneRow  = rec.phone   !== '--' ? `<div class="rr"><span>Phone</span><span>${rec.phone}</span></div>`   : '';
   const remarkRow = rec.remarks !== '--' ? `<div class="rr"><span>Remarks</span><span>${rec.remarks}</span></div>` : '';
 
@@ -432,10 +448,8 @@ function showExitReceipt(rec) {
       ${phoneRow}${remarkRow}
     </div>
     <div class="rs"><h3>Parking Duration</h3>
-      <div class="rr"><span>Entry Date</span><span>${ed.toLocaleDateString('en-IN')}</span></div>
-      <div class="rr"><span>Entry Time</span><span>${ed.toLocaleTimeString('en-IN')}</span></div>
-      <div class="rr"><span>Exit Date</span><span>${xd.toLocaleDateString('en-IN')}</span></div>
-      <div class="rr"><span>Exit Time</span><span>${xd.toLocaleTimeString('en-IN')}</span></div>
+      <div class="rr"><span>Entry Date</span><span>${formatDate(rec.entryDate)}</span></div>
+      <div class="rr"><span>Exit Date</span><span>${formatDate(rec.exitDate)}</span></div>
       <div class="rr bold"><span>Duration</span><span>${rec.days} Day${rec.days > 1 ? 's' : ''}</span></div>
     </div>
     <div class="rs"><h3>Billing</h3>
@@ -448,7 +462,6 @@ function showExitReceipt(rec) {
       <p style="margin-top:4px">Thank you for using KPR Transport Parking</p>
     </div>`;
 
-  // Store print data for the print button
   window._lastReceiptData = {
     type:       'exit',
     token:      String(rec.token),
@@ -456,8 +469,8 @@ function showExitReceipt(rec) {
     driver:     rec.driver  !== '--' ? rec.driver  : '',
     phone:      rec.phone   !== '--' ? rec.phone   : '',
     remarks:    rec.remarks !== '--' ? rec.remarks : '',
-    entry_time: ed.toLocaleDateString('en-IN') + ' ' + ed.toLocaleTimeString('en-IN'),
-    exit_time:  xd.toLocaleDateString('en-IN') + ' ' + xd.toLocaleTimeString('en-IN'),
+    entry_date: formatDate(rec.entryDate),
+    exit_date:  formatDate(rec.exitDate),
     duration:   rec.days + ' Day' + (rec.days > 1 ? 's' : ''),
     days:       rec.days,
     rate:       dailyRate,
@@ -465,8 +478,6 @@ function showExitReceipt(rec) {
   };
 
   document.getElementById('receiptOv').classList.add('open');
-
-  // Auto-send to printer immediately when receipt appears
   sendToPrinter(window._lastReceiptData);
 }
 
@@ -477,7 +488,6 @@ function closeReceipt() {
 }
 
 function printReceipt() {
-  // Open browser print dialog (as backup / for manual reprint)
   const c = document.getElementById('receiptContent').innerHTML;
   const w = window.open('', '_blank', 'width=400,height=650');
   w.document.write(`<!DOCTYPE html><html><head><title>KPR Receipt</title>
@@ -502,7 +512,6 @@ function printReceipt() {
   w.document.close();
   setTimeout(() => w.print(), 300);
 
-  // Also re-send to printer (in case it was missed on first auto-send)
   if (window._lastReceiptData) {
     sendToPrinter(window._lastReceiptData);
   }
@@ -557,9 +566,9 @@ function renderParked(filter) {
     return;
   }
 
-  const now = new Date();
+  const exitDate = document.getElementById('exitDateInput')?.value || new Date().toISOString().split('T')[0];
   el.innerHTML = parked.map(r => {
-    const days       = calcDays(r.entryISO, now.toISOString());
+    const days       = calcDays(r.entryDate, exitDate);
     const amt        = calcAmt(days);
     const driverLine = r.driver !== '--' ? `<br>Driver: <b>${r.driver}</b>` : '';
     const phoneLine  = r.phone  !== '--' ? ` · <span style="color:var(--blue)">${r.phone}</span>` : '';
@@ -663,11 +672,11 @@ function renderRecords() {
 
 // ── STATS ─────────────────────────────────────────────────────
 function updateStats() {
-  const today  = new Date().toDateString();
+  const today  = new Date().toISOString().split('T')[0];
   const parked = db.filter(r => r.status === 'IN').length;
-  const tEnt   = db.filter(r => new Date(r.entryISO).toDateString() === today).length;
-  const tExit  = db.filter(r => r.status === 'OUT' && r.exitISO && new Date(r.exitISO).toDateString() === today).length;
-  const tRev   = db.filter(r => r.status === 'OUT' && r.exitISO && new Date(r.exitISO).toDateString() === today)
+  const tEnt   = db.filter(r => r.entryDate === today).length;
+  const tExit  = db.filter(r => r.status === 'OUT' && r.exitDate === today).length;
+  const tRev   = db.filter(r => r.status === 'OUT' && r.exitDate === today)
                    .reduce((s, r) => s + (r.amount || 0), 0);
   const total  = db.length;
   const exited = db.filter(r => r.status === 'OUT').length;
@@ -739,13 +748,13 @@ function importExcel(event) {
 
       if (backendOnline) {
         const payload = rows.map(row => ({
-          lorry:    (row['Lorry Number'] || row['lorry'] || '').toString(),
-          driver:   row['Driver Name']   || row['driver']  || '--',
-          phone:    row['Driver Phone']  || row['phone']   || '--',
-          remarks:  row['Remarks']       || row['remarks'] || '--',
-          token:    row['Token'] ? parseInt(row['Token']) : undefined,
-          entryISO: row['Entry DateTime'] ? new Date(row['Entry DateTime']).toISOString() : undefined,
-          exitISO:  row['Exit DateTime']  ? new Date(row['Exit DateTime']).toISOString()  : undefined
+          lorry:     (row['Lorry Number'] || row['lorry'] || '').toString(),
+          driver:    row['Driver Name']   || row['driver']  || '--',
+          phone:     row['Driver Phone']  || row['phone']   || '--',
+          remarks:   row['Remarks']       || row['remarks'] || '--',
+          token:     row['Token'] ? parseInt(row['Token']) : undefined,
+          entryDate: row['Entry Date'] ? new Date(row['Entry Date']).toISOString().split('T')[0] : undefined,
+          exitDate:  row['Exit Date']  ? new Date(row['Exit Date']).toISOString().split('T')[0]  : undefined
         })).filter(r => r.lorry.trim());
 
         const resp = await apiFetch('/import', {
@@ -764,11 +773,10 @@ function importExcel(event) {
         rows.forEach(row => {
           const lorry = (row['Lorry Number'] || row['lorry'] || '').toString().toUpperCase().trim();
           if (!lorry) return;
-          const ed = new Date(row['Entry DateTime'] || row['entry'] || new Date());
-          const xr = row['Exit DateTime'] || row['exit'] || null;
-          const xd = xr ? new Date(xr) : null;
-          const status = xd ? 'OUT' : 'IN';
-          const days   = xd ? calcDays(ed.toISOString(), xd.toISOString()) : null;
+          const entryDate = row['Entry Date'] ? new Date(row['Entry Date']).toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
+          const exitDate  = row['Exit Date'] ? new Date(row['Exit Date']).toISOString().split('T')[0] : null;
+          const status    = exitDate ? 'OUT' : 'IN';
+          const days      = exitDate ? calcDays(entryDate, exitDate) : null;
           db.push({
             id: Date.now() + added,
             token: parseInt(row['Token']) || nxt++,
@@ -776,10 +784,10 @@ function importExcel(event) {
             driver:       row['Driver Name']  || '--',
             phone:        row['Driver Phone'] || '--',
             remarks:      row['Remarks']      || '--',
-            entryISO:     ed.toISOString(),
-            entryDisplay: ed.toLocaleString('en-IN'),
-            exitISO:      xd ? xd.toISOString() : null,
-            exitDisplay:  xd ? xd.toLocaleString('en-IN') : '--',
+            entryDate:    entryDate,
+            entryDisplay: formatDate(entryDate),
+            exitDate:     exitDate,
+            exitDisplay:  exitDate ? formatDate(exitDate) : '--',
             amount:       days ? calcAmt(days) : null
           });
           added++;
@@ -815,10 +823,8 @@ function exportExcel(filter) {
     'Driver Name':     r.driver,
     'Driver Phone':    r.phone  || '--',
     'Remarks':         r.remarks,
-    'Entry Date':      r.entryISO ? new Date(r.entryISO).toLocaleDateString('en-IN') : '--',
-    'Entry Time':      r.entryISO ? new Date(r.entryISO).toLocaleTimeString('en-IN') : '--',
-    'Exit Date':       r.exitISO  ? new Date(r.exitISO).toLocaleDateString('en-IN')  : '--',
-    'Exit Time':       r.exitISO  ? new Date(r.exitISO).toLocaleTimeString('en-IN')  : '--',
+    'Entry Date':      r.entryDate ? formatDate(r.entryDate) : '--',
+    'Exit Date':       r.exitDate  ? formatDate(r.exitDate)  : '--',
     'Duration (Days)': r.days   != null ? r.days   : '--',
     'Rate/Day (Rs.)':  dailyRate,
     'Amount (Rs.)':    r.amount != null ? r.amount : '--',
@@ -830,7 +836,7 @@ function exportExcel(filter) {
   XLSX.utils.book_append_sheet(wb, ws, 'Records');
   ws['!cols'] = [
     {wch:10},{wch:5},{wch:16},{wch:16},{wch:14},{wch:20},
-    {wch:13},{wch:12},{wch:13},{wch:12},{wch:12},{wch:10},{wch:12},{wch:10}
+    {wch:13},{wch:12},{wch:12},{wch:10},{wch:12},{wch:10}
   ];
   XLSX.writeFile(wb, fname + '_' + new Date().toISOString().split('T')[0] + '.xlsx');
   notify('Exported ' + recs.length + ' records', 'success');
@@ -841,6 +847,7 @@ document.addEventListener('DOMContentLoaded', async function () {
   document.getElementById('dailyRateInput').value = dailyRate;
   document.getElementById('rateShow').textContent  = dailyRate;
 
+  initDateInputs();
   updateStats();
   refreshToken();
   renderRecent();
@@ -856,4 +863,16 @@ document.addEventListener('DOMContentLoaded', async function () {
     showOnlineStatus();
     updateStats();
   }, 30000);
+  
+  // Re-calculate on exit date change
+  const exitDateInput = document.getElementById('exitDateInput');
+  if (exitDateInput) {
+    exitDateInput.addEventListener('change', function() {
+      const token = document.getElementById('exitToken').value;
+      if (token) {
+        lookupToken(token);
+      }
+      renderParked();
+    });
+  }
 });

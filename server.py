@@ -2,13 +2,14 @@
 #  KPR TRANSPORT PARKING SYSTEM — Python Backend
 #  server.py  |  Flask + SQLite
 #
-#  IMPROVED VERSION:
-#  - Date-only billing (no time component)
-#  - Entry 14th Feb, Exit 18th Feb = 4 days (not 5)
-#  - Enhanced error handling
+#  BILLING MODEL: DAY-WISE
+#  - entry_date / exit_date compared for calendar day difference
+#  - billable_days = (exit_date − entry_date).days  (minimum 1)
+#  - amount        = billable_days × daily_rate
 # ================================================================
 
 import os
+import math
 import sqlite3
 import datetime
 from contextlib import contextmanager
@@ -52,21 +53,23 @@ def init_db():
     with db_conn() as con:
         con.executescript("""
             CREATE TABLE IF NOT EXISTS records (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                token         INTEGER NOT NULL UNIQUE,
-                lorry         TEXT    NOT NULL COLLATE NOCASE,
-                driver        TEXT    NOT NULL DEFAULT '--',
-                phone         TEXT    NOT NULL DEFAULT '--',
-                remarks       TEXT    NOT NULL DEFAULT '--',
-                entry_date    TEXT    NOT NULL,
-                entry_display TEXT    NOT NULL,
-                exit_date     TEXT,
-                exit_display  TEXT    DEFAULT '--',
-                days          INTEGER,
-                amount        REAL,
-                status        TEXT    NOT NULL DEFAULT 'IN'
-                                      CHECK(status IN ('IN','OUT')),
-                created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                token            INTEGER NOT NULL UNIQUE,
+                lorry            TEXT    NOT NULL COLLATE NOCASE,
+                driver           TEXT    NOT NULL DEFAULT '--',
+                phone            TEXT    NOT NULL DEFAULT '--',
+                remarks          TEXT    NOT NULL DEFAULT '--',
+                entry_date       TEXT    NOT NULL,
+                entry_time       TEXT,
+                entry_display    TEXT    NOT NULL,
+                exit_date        TEXT,
+                exit_time        TEXT,
+                exit_display     TEXT    DEFAULT '--',
+                duration_minutes INTEGER,
+                amount           REAL,
+                status           TEXT    NOT NULL DEFAULT 'IN'
+                                         CHECK(status IN ('IN','OUT')),
+                created_at       TEXT    NOT NULL DEFAULT (datetime('now'))
             );
 
             CREATE TABLE IF NOT EXISTS settings (
@@ -90,8 +93,22 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_exit      ON records(exit_date);
             CREATE INDEX IF NOT EXISTS idx_pq_status ON print_queue(status);
 
-            INSERT OR IGNORE INTO settings(key, value) VALUES ('daily_rate', '120');
+            INSERT OR IGNORE INTO settings(key, value) VALUES ('hourly_rate', '130');
         """)
+        # Migrate old databases: add new columns if they don't exist
+        for col, typ in [
+            ("entry_time",       "TEXT"),
+            ("exit_time",        "TEXT"),
+            ("duration_minutes", "INTEGER"),
+        ]:
+            try:
+                con.execute(f"ALTER TABLE records ADD COLUMN {col} {typ}")
+            except Exception:
+                pass  # column already exists
+        # Migrate old daily_rate key → hourly_rate
+        old = con.execute("SELECT value FROM settings WHERE key='daily_rate'").fetchone()
+        if old:
+            con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('hourly_rate',?)", (old["value"],))
 
 init_db()
 
@@ -101,51 +118,47 @@ def row_to_dict(row) -> dict | None:
         return None
     r = dict(row)
     return {
-        "id":           r["id"],
-        "token":        r["token"],
-        "lorry":        r["lorry"],
-        "driver":       r["driver"],
-        "phone":        r["phone"],
-        "remarks":      r["remarks"],
-        "entryDate":    r["entry_date"],
-        "entryDisplay": r["entry_display"],
-        "exitDate":     r["exit_date"],
-        "exitDisplay":  r["exit_display"] or "--",
-        "days":         r["days"],
-        "amount":       r["amount"],
-        "status":       r["status"],
-        "createdAt":    r["created_at"],
+        "id":              r["id"],
+        "token":           r["token"],
+        "lorry":           r["lorry"],
+        "driver":          r["driver"],
+        "phone":           r["phone"],
+        "remarks":         r["remarks"],
+        "entryDate":       r["entry_date"],
+        "entryTime":       r.get("entry_time"),
+        "entryDisplay":    r["entry_display"],
+        "exitDate":        r.get("exit_date"),
+        "exitTime":        r.get("exit_time"),
+        "exitDisplay":     r.get("exit_display") or "--",
+        "durationMin":     r.get("duration_minutes"),
+        "amount":          r["amount"],
+        "status":          r["status"],
+        "createdAt":       r["created_at"],
     }
 
 def get_rate(con: sqlite3.Connection) -> float:
-    row = con.execute("SELECT value FROM settings WHERE key='daily_rate'").fetchone()
-    return float(row["value"]) if row else 120.0
+    row = con.execute("SELECT value FROM settings WHERE key='hourly_rate'").fetchone()
+    return float(row["value"]) if row else 130.0
 
-def calc_days(entry_date: str, exit_date: str) -> int:
+def calc_duration(entry_date: str, entry_time: str | None,
+                  exit_date:  str, exit_time:  str | None) -> dict:
     """
-    Calculate parking days using DATE ONLY (not time).
-    Entry: 2025-02-14, Exit: 2025-02-18 → 4 days
-    Formula: exit_date - entry_date
+    Day-wise billing.
+    Returns { duration_minutes (days×1440), billable_days }
+    Minimum: 1 day.
     """
     try:
-        # Parse dates (format: YYYY-MM-DD)
-        entry = datetime.datetime.strptime(entry_date[:10], "%Y-%m-%d").date()
-        exit_ = datetime.datetime.strptime(exit_date[:10], "%Y-%m-%d").date()
-        
-        # Calculate difference in days
-        diff_days = (exit_ - entry).days
-        
-        # Minimum 1 day (same day entry/exit = 1 day)
-        return max(1, diff_days) if diff_days > 0 else 1
+        ed = datetime.date.fromisoformat(entry_date[:10])
+        xd = datetime.date.fromisoformat(exit_date[:10])
+        days = max(1, (xd - ed).days)
     except Exception:
-        return 1
+        days = 1
+    return {"duration_minutes": days * 1440, "billable_days": days}
 
 def today_date() -> str:
-    """Return today's date in YYYY-MM-DD format"""
     return datetime.date.today().strftime("%Y-%m-%d")
 
 def fmt_display(date_str: str) -> str:
-    """Format date for display: DD/MM/YYYY"""
     try:
         dt = datetime.datetime.strptime(date_str[:10], "%Y-%m-%d")
         return dt.strftime("%d/%m/%Y")
@@ -210,17 +223,19 @@ def get_settings():
 @app.post("/api/settings")
 def post_settings():
     body = request.get_json(silent=True) or {}
-    if "daily_rate" not in body:
-        return err("daily_rate required")
+    # Accept either key name for compatibility
+    rate_val = body.get("hourly_rate") or body.get("daily_rate")
+    if rate_val is None:
+        return err("hourly_rate required")
     try:
-        rate = float(body["daily_rate"])
+        rate = float(rate_val)
         if rate < 1:
             raise ValueError
     except (TypeError, ValueError):
         return err("Invalid rate")
     with db_conn() as con:
-        con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('daily_rate',?)", (str(rate),))
-    return ok({"daily_rate": rate})
+        con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('hourly_rate',?)", (str(rate),))
+    return ok({"hourly_rate": rate})
 
 
 @app.get("/api/records")
@@ -232,20 +247,17 @@ def get_records():
     offset = (page - 1) * limit
 
     with db_conn() as con:
-        sql = "SELECT * FROM records WHERE 1=1"
+        sql    = "SELECT * FROM records WHERE 1=1"
         params = []
-
         if status in ("IN", "OUT"):
             sql += " AND status = ?"
             params.append(status)
         if q:
             sql += " AND (lorry LIKE ? OR driver LIKE ? OR CAST(token AS TEXT) LIKE ?)"
-            qp = f"%{q}%"
+            qp   = f"%{q}%"
             params.extend([qp, qp, qp])
-
         sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
-
         rows = con.execute(sql, params).fetchall()
 
     return ok([row_to_dict(r) for r in rows])
@@ -262,15 +274,15 @@ def get_record(rec_id: int):
 
 @app.post("/api/records")
 def create_record():
-    body = request.get_json(silent=True) or {}
-    lorry = (body.get("lorry") or "").strip().upper()
+    body       = request.get_json(silent=True) or {}
+    lorry      = (body.get("lorry") or "").strip().upper()
     if not lorry:
         return err("Lorry number required")
 
-    entry_date = body.get("entryDate") or today_date()
-    
+    entry_date = (body.get("entryDate") or today_date())[:10]
+    entry_time = (body.get("entryTime") or "")[:5] or None  # "HH:MM" or None
+
     with db_conn() as con:
-        # Check for duplicate parked vehicle
         dup = con.execute(
             "SELECT token FROM records WHERE lorry=? AND status='IN'", (lorry,)
         ).fetchone()
@@ -280,16 +292,15 @@ def create_record():
         token = next_token(con)
         con.execute("""
             INSERT INTO records
-                (token, lorry, driver, phone, remarks, entry_date, entry_display, status)
-            VALUES (?,?,?,?,?, ?,?, 'IN')
+                (token, lorry, driver, phone, remarks,
+                 entry_date, entry_time, entry_display, status)
+            VALUES (?,?,?,?,?, ?,?,?, 'IN')
         """, (
-            token,
-            lorry,
+            token, lorry,
             (body.get("driver")  or "--").strip() or "--",
             (body.get("phone")   or "--").strip() or "--",
             (body.get("remarks") or "--").strip() or "--",
-            entry_date,
-            fmt_display(entry_date)
+            entry_date, entry_time, fmt_display(entry_date)
         ))
         row = con.execute("SELECT * FROM records WHERE token=?", (token,)).fetchone()
 
@@ -298,8 +309,9 @@ def create_record():
 
 @app.patch("/api/records/<int:rec_id>/exit")
 def exit_record(rec_id: int):
-    body = request.get_json(silent=True) or {}
-    exit_date = body.get("exitDate") or today_date()
+    body      = request.get_json(silent=True) or {}
+    exit_date = (body.get("exitDate") or today_date())[:10]
+    exit_time = (body.get("exitTime") or "")[:5] or None  # "HH:MM" or None
 
     with db_conn() as con:
         row = con.execute("SELECT * FROM records WHERE id=?", (rec_id,)).fetchone()
@@ -308,20 +320,22 @@ def exit_record(rec_id: int):
         if row["status"] == "OUT":
             return err("Vehicle already exited", 400)
 
-        entry_date = row["entry_date"]
-        days = calc_days(entry_date, exit_date)
-        rate = get_rate(con)
-        amount = days * rate
+        dur    = calc_duration(row["entry_date"], row["entry_time"], exit_date, exit_time)
+        rate   = get_rate(con)
+        amount = dur["billable_days"] * rate
 
         con.execute("""
             UPDATE records
-            SET exit_date=?, exit_display=?, days=?, amount=?, status='OUT'
+            SET exit_date=?, exit_time=?, exit_display=?,
+                duration_minutes=?, amount=?, status='OUT'
             WHERE id=?
-        """, (exit_date, fmt_display(exit_date), days, amount, rec_id))
+        """, (exit_date, exit_time, fmt_display(exit_date),
+              dur["duration_minutes"], amount, rec_id))
 
         updated = con.execute("SELECT * FROM records WHERE id=?", (rec_id,)).fetchone()
 
-    return ok(row_to_dict(updated), message=f"Exit processed: {days} days, Rs.{amount}")
+    return ok(row_to_dict(updated),
+              message=f"Exit processed: {dur['billable_days']} day(s), Rs.{amount}")
 
 
 @app.delete("/api/records/<int:rec_id>")
@@ -346,7 +360,7 @@ def delete_all_records():
 
 @app.post("/api/import")
 def import_records():
-    body = request.get_json(silent=True) or {}
+    body    = request.get_json(silent=True) or {}
     records = body.get("records", [])
     if not records:
         return err("No records provided")
@@ -363,11 +377,14 @@ def import_records():
                 if not lorry:
                     raise ValueError("Missing lorry")
 
-                entry_date = r.get("entryDate") or today_date()
-                exit_date  = r.get("exitDate")  or None
+                entry_date = (r.get("entryDate") or today_date())[:10]
+                entry_time = (r.get("entryTime") or "")[:5] or None
+                exit_date  = (r.get("exitDate") or "")[:10] or None
+                exit_time  = (r.get("exitTime") or "")[:5]  or None
                 status     = "OUT" if exit_date else "IN"
-                days       = calc_days(entry_date, exit_date) if exit_date else None
-                amount     = days * rate if days else None
+
+                dur    = calc_duration(entry_date, entry_time, exit_date, exit_time) if exit_date else None
+                amount = (dur["billable_days"] * rate) if dur else None
 
                 token = int(r["token"]) if r.get("token") else None
                 if token:
@@ -376,48 +393,40 @@ def import_records():
                     ).fetchone()
                     if conflict:
                         token = None
-
                 if not token:
                     token = next_token(con)
 
                 con.execute("""
                     INSERT INTO records
                         (token, lorry, driver, phone, remarks,
-                         entry_date, entry_display,
-                         exit_date, exit_display,
-                         days, amount, status)
-                    VALUES (?,?,?,?,?, ?,?, ?,?, ?,?,?)
+                         entry_date, entry_time, entry_display,
+                         exit_date,  exit_time,  exit_display,
+                         duration_minutes, amount, status)
+                    VALUES (?,?,?,?,?, ?,?,?, ?,?,?, ?,?,?)
                 """, (
-                    token,
-                    lorry,
+                    token, lorry,
                     (r.get("driver")  or "--").strip() or "--",
                     (r.get("phone")   or "--").strip() or "--",
                     (r.get("remarks") or "--").strip() or "--",
-                    entry_date,
-                    fmt_display(entry_date),
-                    exit_date,
+                    entry_date, entry_time, fmt_display(entry_date),
+                    exit_date,  exit_time,
                     fmt_display(exit_date) if exit_date else "--",
-                    days,
-                    amount,
-                    status,
+                    dur["duration_minutes"] if dur else None,
+                    amount, status,
                 ))
                 added += 1
 
             except Exception as e:
                 errors.append({"row": i + 1, "error": str(e)})
 
-    resp = {
-        "ok":      True,
-        "added":   added,
-        "message": f"Imported {added} of {len(records)} records",
-    }
+    resp = {"ok": True, "added": added, "message": f"Imported {added} of {len(records)} records"}
     if errors:
         resp["errors"] = errors
     return jsonify(resp)
 
 
 # ================================================================
-#  PRINT QUEUE — Print endpoints
+#  PRINT QUEUE
 # ================================================================
 
 @app.post("/api/print-queue")
@@ -425,11 +434,9 @@ def enqueue_print():
     secret = os.environ.get("PRINT_SECRET", "KPR2024SECRET")
     if request.headers.get("X-Print-Token", "") != secret:
         return err("Unauthorized", 401)
-
     data = request.get_json(silent=True)
     if not data:
         return err("No JSON body")
-
     import json
     with db_conn() as con:
         con.execute(
@@ -437,7 +444,6 @@ def enqueue_print():
             (json.dumps(data),)
         )
         job_id = con.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-
     return ok({"job_id": job_id, "message": "Print job queued"})
 
 
@@ -446,24 +452,17 @@ def get_pending_jobs():
     secret = os.environ.get("PRINT_SECRET", "KPR2024SECRET")
     if request.headers.get("X-Print-Token", "") != secret:
         return err("Unauthorized", 401)
-
     import json
     with db_conn() as con:
         rows = con.execute(
             "SELECT id, job_data, created_at FROM print_queue WHERE status='pending' ORDER BY id ASC"
         ).fetchall()
-
     jobs = []
     for row in rows:
         try:
-            jobs.append({
-                "id":         row["id"],
-                "data":       json.loads(row["job_data"]),
-                "created_at": row["created_at"]
-            })
+            jobs.append({"id": row["id"], "data": json.loads(row["job_data"]), "created_at": row["created_at"]})
         except Exception:
             pass
-
     return ok(jobs)
 
 
@@ -472,10 +471,8 @@ def ack_print_job(job_id: int):
     secret = os.environ.get("PRINT_SECRET", "KPR2024SECRET")
     if request.headers.get("X-Print-Token", "") != secret:
         return err("Unauthorized", 401)
-
     body   = request.get_json(silent=True) or {}
     status = "done" if body.get("success", True) else "failed"
-
     with db_conn() as con:
         row = con.execute("SELECT id FROM print_queue WHERE id=?", (job_id,)).fetchone()
         if not row:
@@ -484,7 +481,6 @@ def ack_print_job(job_id: int):
             "UPDATE print_queue SET status=?, ack_at=datetime('now') WHERE id=?",
             (status, job_id)
         )
-
     return ok({"job_id": job_id, "status": status})
 
 
@@ -493,29 +489,20 @@ def list_print_queue():
     secret = os.environ.get("PRINT_SECRET", "KPR2024SECRET")
     if request.headers.get("X-Print-Token", "") != secret:
         return err("Unauthorized", 401)
-
     import json
     with db_conn() as con:
         rows = con.execute(
             "SELECT id, status, created_at, ack_at, job_data FROM print_queue ORDER BY id DESC LIMIT 100"
         ).fetchall()
-
     jobs = []
     for row in rows:
         try:
             d = json.loads(row["job_data"])
-            jobs.append({
-                "id":         row["id"],
-                "status":     row["status"],
-                "created_at": row["created_at"],
-                "ack_at":     row["ack_at"],
-                "token":      d.get("token"),
-                "lorry":      d.get("lorry"),
-                "type":       d.get("type"),
-            })
+            jobs.append({"id": row["id"], "status": row["status"],
+                         "created_at": row["created_at"], "ack_at": row["ack_at"],
+                         "token": d.get("token"), "lorry": d.get("lorry"), "type": d.get("type")})
         except Exception:
             pass
-
     return ok(jobs)
 
 
@@ -524,7 +511,6 @@ def delete_print_job(job_id: int):
     secret = os.environ.get("PRINT_SECRET", "KPR2024SECRET")
     if request.headers.get("X-Print-Token", "") != secret:
         return err("Unauthorized", 401)
-
     with db_conn() as con:
         con.execute("DELETE FROM print_queue WHERE id=?", (job_id,))
     return ok(message=f"Job {job_id} deleted")
@@ -535,7 +521,6 @@ def clear_old_print_jobs():
     secret = os.environ.get("PRINT_SECRET", "KPR2024SECRET")
     if request.headers.get("X-Print-Token", "") != secret:
         return err("Unauthorized", 401)
-
     with db_conn() as con:
         con.execute(
             "DELETE FROM print_queue WHERE status != 'pending' AND created_at < datetime('now', '-7 days')"
@@ -547,6 +532,6 @@ def clear_old_print_jobs():
 if __name__ == "__main__":
     print(f"🚛 KPR Transport API running at http://localhost:{PORT}")
     print(f"📁 Database: {DB_PATH}")
-    print(f"📅 Billing: DATE-ONLY calculation (14th-18th = 4 days)")
-    print(f"🖨️  Print Queue: enabled")
+    print(f"🗓  Billing: DAY-WISE — (exitDate − entryDate) days × rate (min 1 day)")
+    print(f"🖨  Print Queue: enabled")
     app.run(host="0.0.0.0", port=PORT, debug=False)

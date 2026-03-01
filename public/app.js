@@ -1,29 +1,36 @@
 /* ============================================================
    KPR TRANSPORT - PARKING MANAGEMENT SYSTEM
-   app.js  —  IMPROVED VERSION with DATE-ONLY billing
-   
-   IMPROVEMENTS:
-   - Date pickers for entry/exit (defaults to today)
-   - Date-only billing: 14th Feb to 18th Feb = 4 days
-   - Better UX and error handling
+   app.js  —  DAY-WISE BILLING
+
+   BILLING MODEL:
+   - Day-wise billing based on calendar date difference
+   - Entry 01/02/26, Exit 04/02/26 = 3 days billed
+   - Amount = (exitDate − entryDate) days × daily_rate
+   - Minimum charge: 1 day
+
+   TIME INPUTS:
+   - Auto-populated with live current time on page/tab open
+   - User can manually edit any time field
+   - "↺ Now" button instantly resets to current time
+   - Times sent to print server as "09:57 AM" format
    ============================================================ */
 
-// ── API Config ──────────────────────────────────────────────
+// ── API Config ───────────────────────────────────────────────
 const API = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
   ? `http://${window.location.hostname}:3000/api`
   : `${window.location.origin}/api`;
 
 const PRINT_SECRET = 'KPR2024SECRET';
 
-// ── Data Store (local cache) ────────────────────────────────
-let db          = JSON.parse(localStorage.getItem('kpr_db')   || '[]');
-let dailyRate   = parseInt(localStorage.getItem('kpr_rate')   || '120');
+// ── Data Store ───────────────────────────────────────────────
+let db              = JSON.parse(localStorage.getItem('kpr_db')   || '[]');
+let dailyRate       = parseInt(localStorage.getItem('kpr_rate')   || '130');
 let recFilterStatus = 'all';
-let backendOnline = false;
+let backendOnline   = false;
 
-// ── Sync helpers ─────────────────────────────────────────────
+// ── API helpers ──────────────────────────────────────────────
 async function apiFetch(path, opts = {}) {
-  const res = await fetch(API + path, {
+  const res  = await fetch(API + path, {
     headers: { 'Content-Type': 'application/json' },
     ...opts
   });
@@ -38,8 +45,8 @@ async function syncFromServer() {
       apiFetch('/records?limit=5000'),
       apiFetch('/settings')
     ]);
-    db        = records.data;
-    dailyRate = parseFloat(settings.data.daily_rate) || 120;
+    db         = records.data;
+    dailyRate  = parseFloat(settings.data.hourly_rate) || 130;
     saveLocal();
     backendOnline = true;
   } catch (_) {
@@ -56,9 +63,9 @@ function saveLocal() {
 function showOnlineStatus() {
   const badge = document.getElementById('onlineBadge');
   if (!badge) return;
-  badge.textContent  = backendOnline ? '● Live' : '○ Offline';
-  badge.style.color  = backendOnline ? '#22c55e' : '#f59e0b';
-  badge.title        = backendOnline
+  badge.textContent = backendOnline ? '● Live' : '○ Offline';
+  badge.style.color = backendOnline ? '#22c55e' : '#f59e0b';
+  badge.title       = backendOnline
     ? 'Connected to server — data is synced'
     : 'Server unreachable — using local storage';
 }
@@ -75,17 +82,13 @@ function refreshToken() {
 
 // ── Rate ─────────────────────────────────────────────────────
 async function saveRate() {
-  const v = parseInt(document.getElementById('dailyRateInput').value) || 120;
+  const v = parseInt(document.getElementById('dailyRateInput').value) || 130;
   dailyRate = v;
   localStorage.setItem('kpr_rate', v);
   document.getElementById('rateShow').textContent = v;
-
   if (backendOnline) {
     try {
-      await apiFetch('/settings', {
-        method: 'POST',
-        body: JSON.stringify({ daily_rate: v })
-      });
+      await apiFetch('/settings', { method: 'POST', body: JSON.stringify({ hourly_rate: v }) });
       notify('Rate updated to Rs.' + v + '/day', 'success');
     } catch (e) {
       notify('Saved locally — server sync failed', 'info');
@@ -95,7 +98,7 @@ async function saveRate() {
   }
 }
 
-// ── Clock & Date/Time Initialization ─────────────────────────
+// ── Clock ────────────────────────────────────────────────────
 function tick() {
   const now = new Date();
   document.getElementById('clockTime').textContent =
@@ -106,19 +109,89 @@ function tick() {
 setInterval(tick, 1000);
 tick();
 
-// Initialize date inputs with today's date
-function initDateInputs() {
-  const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
-  
-  const entryDateInput = document.getElementById('entryDateInput');
-  const exitDateInput = document.getElementById('exitDateInput');
-  
-  if (entryDateInput && !entryDateInput.value) {
-    entryDateInput.value = today;
-  }
-  if (exitDateInput && !exitDateInput.value) {
-    exitDateInput.value = today;
-  }
+// ── Time helpers ─────────────────────────────────────────────
+
+/** Returns current time as "HH:MM" (24h) for <input type="time"> */
+function liveTime24() {
+  const n = new Date();
+  return n.toTimeString().slice(0, 5); // "HH:MM"
+}
+
+/** "HH:MM" (24h) → "09:57 AM" */
+function to12h(t24) {
+  if (!t24) return '';
+  try {
+    const [h, m] = t24.split(':').map(Number);
+    const ampm   = h >= 12 ? 'PM' : 'AM';
+    const h12    = h % 12 || 12;
+    return `${String(h12).padStart(2, '0')}:${String(m).padStart(2, '0')} ${ampm}`;
+  } catch (e) { return t24; }
+}
+
+/** "09:57 AM" → "HH:MM" (24h) */
+function to24h(t12) {
+  if (!t12) return '';
+  const m = t12.match(/(\d+):(\d+)\s*(AM|PM)/i);
+  if (!m) return t12.slice(0, 5);
+  let h = parseInt(m[1]);
+  if (m[3].toUpperCase() === 'PM' && h !== 12) h += 12;
+  if (m[3].toUpperCase() === 'AM' && h === 12)  h  = 0;
+  return `${String(h).padStart(2, '0')}:${m[2]}`;
+}
+
+/** Calendar days between two date strings (exit − entry). Minimum 1. */
+function daysBetween(entryDate, exitDate) {
+  try {
+    const a = new Date(entryDate + 'T00:00:00');
+    const b = new Date(exitDate  + 'T00:00:00');
+    const diff = Math.round((b - a) / 86400000); // ms per day
+    return Math.max(1, diff);
+  } catch (e) { return 1; }
+}
+
+/** Format days as "3 Days" / "1 Day" */
+function fmtDuration(days) {
+  return days + ' Day' + (days !== 1 ? 's' : '');
+}
+
+/** Full billing calc → { days, display, amount } */
+function calcBilling(entryDate, entryTime, exitDate, exitTime) {
+  const days = daysBetween(entryDate, exitDate || new Date().toISOString().split('T')[0]);
+  return {
+    days,
+    totalMin:       days * 1440,  // kept for legacy compat
+    billableHours:  days * 24,    // kept for legacy compat
+    display: fmtDuration(days),
+    amount:  days * dailyRate
+  };
+}
+
+// ── Date/Time input init ──────────────────────────────────────
+function initAllDateTimeInputs() {
+  const today = new Date().toISOString().split('T')[0];
+  const now   = liveTime24();
+  [
+    ['entryDateInput', today],
+    ['entryTimeInput', now  ],
+    ['exitDateInput',  today],
+    ['exitTimeInput',  now  ],
+  ].forEach(([id, val]) => {
+    const el = document.getElementById(id);
+    if (el && !el.value) el.value = val;
+  });
+}
+
+/** Reset one time input to current live time with a brief flash */
+function resetToNow(inputId) {
+  const el = document.getElementById(inputId);
+  if (!el) return;
+  el.value = liveTime24();
+  el.classList.add('time-flash');
+  setTimeout(() => el.classList.remove('time-flash'), 600);
+  // Re-run lookup / parked list if on exit tab
+  const token = document.getElementById('exitToken')?.value;
+  if (inputId === 'exitTimeInput' && token) lookupToken(token);
+  if (inputId === 'exitTimeInput') renderParked();
 }
 
 // ── Navigation ───────────────────────────────────────────────
@@ -128,12 +201,19 @@ function goTab(tab, btn) {
   document.getElementById('panel-' + tab).classList.add('active');
   btn.classList.add('active');
   document.getElementById('appBody').scrollTop = 0;
-  if (tab === 'exit')    { renderParked(); initDateInputs(); }
+  if (tab === 'exit') {
+    // Reset exit date+time to now if blank
+    const ed = document.getElementById('exitDateInput');
+    const et = document.getElementById('exitTimeInput');
+    if (ed && !ed.value) ed.value = new Date().toISOString().split('T')[0];
+    if (et && !et.value) et.value = liveTime24();
+    renderParked();
+  }
   if (tab === 'records') renderRecords();
   updateStats();
 }
 
-// ── Notifications ────────────────────────────────────────────
+// ── Notifications ─────────────────────────────────────────────
 function notify(msg, type = 'info') {
   const icons = { success: '✅', error: '❌', info: 'ℹ️', warn: '⚠️' };
   const el    = document.createElement('div');
@@ -143,23 +223,13 @@ function notify(msg, type = 'info') {
   setTimeout(() => el.remove(), 3200);
 }
 
-// ── Calculations (DATE-ONLY, no time) ────────────────────────
-function calcDays(entryDate, exitDate) {
-  /**
-   * DATE-ONLY calculation:
-   * Entry: 2025-02-14, Exit: 2025-02-18 → 4 days (18 - 14 = 4)
-   */
+// ── Date format helper ───────────────────────────────────────
+function formatDate(dateStr) {
   try {
-    const entry = new Date(entryDate.split('T')[0]); // Take only date part
-    const exit  = new Date(exitDate.split('T')[0]);
-    
-    const diffDays = Math.round((exit - entry) / 86400000);
-    return Math.max(1, diffDays); // Minimum 1 day
-  } catch(e) {
-    return 1;
-  }
+    const d = new Date(dateStr + 'T00:00:00');
+    return d.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' });
+  } catch (e) { return dateStr; }
 }
-function calcAmt(days) { return days * dailyRate; }
 
 // ── ENTRY ────────────────────────────────────────────────────
 async function recordEntry() {
@@ -171,45 +241,39 @@ async function recordEntry() {
   if (dup) { notify('WARNING: ' + lorry + ' already parked! Token #' + dup.token, 'error'); return; }
 
   const entryDate = document.getElementById('entryDateInput').value;
+  const entryTime = document.getElementById('entryTimeInput').value || liveTime24();
+  if (!entryDate) { notify('Select entry date!', 'error'); return; }
 
   const payload = {
     lorry,
     driver:    document.getElementById('entryDriver').value.trim()  || '--',
     phone:     document.getElementById('entryPhone').value.trim()   || '--',
     remarks:   document.getElementById('entryRemarks').value.trim() || '--',
-    entryDate: entryDate
+    entryDate,
+    entryTime
   };
 
   let rec;
 
   if (backendOnline) {
     try {
-      const resp = await apiFetch('/records', {
-        method: 'POST',
-        body:   JSON.stringify(payload)
-      });
+      const resp = await apiFetch('/records', { method: 'POST', body: JSON.stringify(payload) });
       rec = resp.data;
       db.unshift(rec);
       saveLocal();
-    } catch (e) {
-      notify('Server error: ' + e.message, 'error');
-      return;
-    }
+    } catch (e) { notify('Server error: ' + e.message, 'error'); return; }
   } else {
     const token = getNextToken();
     rec = {
-      id:           Date.now(),
-      token,
-      lorry,
+      id: Date.now(), token, lorry,
       driver:       payload.driver,
       phone:        payload.phone,
       remarks:      payload.remarks,
-      entryDate:    entryDate,
+      entryDate,    entryTime,
       entryDisplay: formatDate(entryDate),
-      exitDate:     null,
+      exitDate:     null, exitTime: null,
       exitDisplay:  '--',
-      days:         null,
-      amount:       null,
+      durationMin:  null, amount: null,
       status:       'IN'
     };
     db.unshift(rec);
@@ -227,7 +291,8 @@ function clearEntry() {
   ['entryLorry', 'entryDriver', 'entryPhone', 'entryRemarks'].forEach(id => {
     document.getElementById(id).value = '';
   });
-  initDateInputs(); // Reset to today
+  document.getElementById('entryDateInput').value = new Date().toISOString().split('T')[0];
+  document.getElementById('entryTimeInput').value = liveTime24();
 }
 
 // ── EXIT — LOOKUP ────────────────────────────────────────────
@@ -241,22 +306,20 @@ function lookupToken(val) {
   if (!val || isNaN(num)) return;
 
   const rec = db.find(r => r.token === num);
-
   if (!rec) {
     errEl.textContent   = 'Token #' + num + ' not found.';
     errEl.style.display = 'block';
     return;
   }
-
   if (rec.status === 'OUT') {
     errEl.textContent   = 'Token #' + num + ' (' + rec.lorry + ') already exited on ' + rec.exitDisplay;
     errEl.style.display = 'block';
     return;
   }
 
-  const exitDate = document.getElementById('exitDateInput').value;
-  const days = calcDays(rec.entryDate, exitDate);
-  const amt  = calcAmt(days);
+  const exitDate = document.getElementById('exitDateInput').value  || new Date().toISOString().split('T')[0];
+  const exitTime = document.getElementById('exitTimeInput').value  || liveTime24();
+  const bill     = calcBilling(rec.entryDate, rec.entryTime || '00:00', exitDate, exitTime);
 
   document.getElementById('lkToken').textContent = '#' + rec.token;
   document.getElementById('lkLorry').textContent = rec.lorry;
@@ -267,23 +330,26 @@ function lookupToken(val) {
   const remarkRow = rec.remarks !== '--'
     ? `<div class="di full"><div class="di-lbl">Remarks</div><div class="di-val">${rec.remarks}</div></div>`
     : '';
+  const entryTimeDisp = rec.entryTime ? ' ' + to12h(rec.entryTime) : '';
 
   document.getElementById('lkDetails').innerHTML =
     `<div class="di"><div class="di-lbl">Driver</div><div class="di-val">${rec.driver}</div></div>` +
     phoneRow +
-    `<div class="di"><div class="di-lbl">Entry Date</div><div class="di-val">${formatDate(rec.entryDate)}</div></div>` +
+    `<div class="di full"><div class="di-lbl">Entry</div><div class="di-val">${formatDate(rec.entryDate)}${entryTimeDisp}</div></div>` +
     remarkRow;
 
-  document.getElementById('lkAmount').textContent = 'Rs.' + amt.toLocaleString('en-IN');
-  document.getElementById('lkInfo').textContent   = days + ' day' + (days > 1 ? 's' : '') + ' × Rs.' + dailyRate + '/day';
+  document.getElementById('lkAmount').textContent = 'Rs.' + bill.amount.toLocaleString('en-IN');
+  document.getElementById('lkInfo').textContent   =
+    bill.display + ' × Rs.' + dailyRate + '/day';
   card.style.display = 'block';
 }
 
 function clearExitForm() {
-  document.getElementById('exitToken').value           = '';
-  document.getElementById('exitError').style.display   = 'none';
-  document.getElementById('lookupCard').style.display  = 'none';
-  initDateInputs();
+  document.getElementById('exitToken').value          = '';
+  document.getElementById('exitError').style.display  = 'none';
+  document.getElementById('lookupCard').style.display = 'none';
+  document.getElementById('exitDateInput').value = new Date().toISOString().split('T')[0];
+  document.getElementById('exitTimeInput').value = liveTime24();
 }
 
 // ── EXIT — PROCESS ───────────────────────────────────────────
@@ -295,8 +361,7 @@ async function processExit() {
   const num = parseInt(val);
   if (!val || isNaN(num)) {
     errEl.textContent = 'Please enter a valid token number.';
-    errEl.style.display = 'block';
-    return;
+    errEl.style.display = 'block'; return;
   }
 
   const idx = db.findIndex(r => r.token === num && r.status === 'IN');
@@ -305,33 +370,31 @@ async function processExit() {
     errEl.textContent   = gone
       ? 'Token #' + num + ' (' + gone.lorry + ') already exited.'
       : 'Token #' + num + ' not found.';
-    errEl.style.display = 'block';
-    return;
+    errEl.style.display = 'block'; return;
   }
 
   const exitDate = document.getElementById('exitDateInput').value;
+  const exitTime = document.getElementById('exitTimeInput').value || liveTime24();
+  if (!exitDate) { errEl.textContent = 'Select exit date!'; errEl.style.display = 'block'; return; }
+
   let rec = db[idx];
 
   if (backendOnline) {
     try {
       const resp = await apiFetch(`/records/${rec.id}/exit`, {
         method: 'PATCH',
-        body:   JSON.stringify({ exitDate: exitDate })
+        body:   JSON.stringify({ exitDate, exitTime })
       });
       db[idx] = resp.data;
       rec     = resp.data;
       saveLocal();
-    } catch (e) {
-      notify('Server error: ' + e.message, 'error');
-      return;
-    }
+    } catch (e) { notify('Server error: ' + e.message, 'error'); return; }
   } else {
-    const days = calcDays(rec.entryDate, exitDate);
-    const amt  = calcAmt(days);
-    rec.exitDate    = exitDate;
+    const bill     = calcBilling(rec.entryDate, rec.entryTime || '00:00', exitDate, exitTime);
+    rec.exitDate   = exitDate; rec.exitTime  = exitTime;
     rec.exitDisplay = formatDate(exitDate);
-    rec.days        = days;
-    rec.amount      = amt;
+    rec.durationMin = bill.totalMin;
+    rec.amount      = bill.amount;
     rec.status      = 'OUT';
     db[idx]         = rec;
     saveLocal();
@@ -344,26 +407,13 @@ async function processExit() {
   notify('Token #' + num + ' exited — Rs.' + rec.amount, 'success');
 }
 
-// ── Helper: Format date for display ──────────────────────────
-function formatDate(dateStr) {
-  try {
-    const d = new Date(dateStr);
-    return d.toLocaleDateString('en-IN');
-  } catch (e) {
-    return dateStr;
-  }
-}
-
-// ── AUTO PRINT — Queue job on server ─────────────────────────
+// ── PRINT QUEUE ──────────────────────────────────────────────
 async function sendToPrinter(data) {
   try {
     const resp = await fetch(`${API}/print-queue`, {
       method: 'POST',
-      headers: {
-        'Content-Type':  'application/json',
-        'X-Print-Token': PRINT_SECRET
-      },
-      body: JSON.stringify(data),
+      headers: { 'Content-Type': 'application/json', 'X-Print-Token': PRINT_SECRET },
+      body:   JSON.stringify(data),
       signal: AbortSignal.timeout(8000)
     });
     if (resp.ok) {
@@ -371,19 +421,19 @@ async function sendToPrinter(data) {
       console.log('[KPR Print] Job queued, ID:', json.data?.job_id);
       notify('🖨 Print job queued — printing at parking ✓', 'success');
     } else {
-      console.warn('[KPR Print] Queue error:', resp.status);
       notify('⚠ Print queue error (' + resp.status + ')', 'warn');
     }
   } catch (err) {
-    console.warn('[KPR Print] Queue unreachable:', err.message);
+    console.warn('[KPR Print]', err.message);
     notify('⚠ Could not queue print job', 'warn');
   }
 }
 
 // ── RECEIPTS ─────────────────────────────────────────────────
 function showEntryReceipt(rec) {
-  const phoneRow   = rec.phone   !== '--' ? `<div class="rr"><span>Phone</span><span>${rec.phone}</span></div>`   : '';
-  const remarkRow  = rec.remarks !== '--' ? `<div class="rr"><span>Remarks</span><span>${rec.remarks}</span></div>` : '';
+  const phoneRow  = rec.phone   !== '--' ? `<div class="rr"><span>Phone Number</span><span>${rec.phone}</span></div>`   : '';
+  const remarkRow = rec.remarks !== '--' ? `<div class="rr"><span>Remarks</span><span>${rec.remarks}</span></div>` : '';
+  const timeStr   = rec.entryTime ? to12h(rec.entryTime) : to12h(liveTime24());
 
   document.getElementById('receiptContent').innerHTML =
     `<div class="rh">
@@ -397,15 +447,16 @@ function showEntryReceipt(rec) {
       <div class="tok-hint">Please keep this receipt for exit</div>
     </div>
     <div class="rs"><h3>Vehicle Details</h3>
-      <div class="rr bold"><span>Lorry No.</span><span>${rec.lorry}</span></div>
-      <div class="rr"><span>Driver</span><span>${rec.driver}</span></div>
+      <div class="rr bold"><span>Lorry No</span><span>${rec.lorry}</span></div>
+      <div class="rr"><span>Driver Name</span><span>${rec.driver}</span></div>
       ${phoneRow}${remarkRow}
     </div>
     <div class="rs"><h3>Entry Details</h3>
-      <div class="rr"><span>Date</span><span>${formatDate(rec.entryDate)}</span></div>
+      <div class="rr"><span>Entry Date</span><span>${formatDate(rec.entryDate)}</span></div>
+      <div class="rr"><span>Entry Time</span><span>${timeStr}</span></div>
     </div>
     <div class="rs"><h3>Billing Info</h3>
-      <div class="rr"><span>Rate / Day</span><span>Rs.${dailyRate}.00</span></div>
+      <div class="rr"><span>Rate/Day</span><span>Rs.${dailyRate}.00</span></div>
       <div class="rr"><span>Payment</span><span>On Exit</span></div>
     </div>
     <div class="rf">
@@ -417,10 +468,11 @@ function showEntryReceipt(rec) {
     type:       'entry',
     token:      String(rec.token),
     lorry:      rec.lorry,
-    driver:     rec.driver !== '--' ? rec.driver : '',
-    phone:      rec.phone  !== '--' ? rec.phone  : '',
+    driver:     rec.driver  !== '--' ? rec.driver  : '',
+    phone:      rec.phone   !== '--' ? rec.phone   : '',
     remarks:    rec.remarks !== '--' ? rec.remarks : '',
     entry_date: formatDate(rec.entryDate),
+    entry_time: timeStr,
     rate:       dailyRate
   };
 
@@ -431,6 +483,22 @@ function showEntryReceipt(rec) {
 function showExitReceipt(rec) {
   const phoneRow  = rec.phone   !== '--' ? `<div class="rr"><span>Phone</span><span>${rec.phone}</span></div>`   : '';
   const remarkRow = rec.remarks !== '--' ? `<div class="rr"><span>Remarks</span><span>${rec.remarks}</span></div>` : '';
+
+  const entryTimeStr = rec.entryTime ? to12h(rec.entryTime) : '';
+  const exitTimeStr  = rec.exitTime  ? to12h(rec.exitTime)  : to12h(liveTime24());
+
+  // Re-compute for display (in case fields came from server without durationMin)
+  let durDisplay, amount;
+  if (rec.durationMin != null && rec.amount != null) {
+    // durationMin is now stored as days for day-wise billing
+    const days = rec.days != null ? rec.days : Math.round(rec.durationMin / 1440);
+    durDisplay = fmtDuration(Math.max(1, days));
+    amount     = rec.amount;
+  } else {
+    const bill = calcBilling(rec.entryDate, rec.entryTime || '00:00', rec.exitDate, rec.exitTime || liveTime24());
+    durDisplay = bill.display;
+    amount     = bill.amount;
+  }
 
   document.getElementById('receiptContent').innerHTML =
     `<div class="rh">
@@ -443,19 +511,18 @@ function showExitReceipt(rec) {
       <div class="tok-num">#${rec.token}</div>
     </div>
     <div class="rs"><h3>Vehicle Details</h3>
-      <div class="rr bold"><span>Lorry No.</span><span>${rec.lorry}</span></div>
+      <div class="rr bold"><span>Lorry No</span><span>${rec.lorry}</span></div>
       <div class="rr"><span>Driver</span><span>${rec.driver}</span></div>
       ${phoneRow}${remarkRow}
     </div>
     <div class="rs"><h3>Parking Duration</h3>
-      <div class="rr"><span>Entry Date</span><span>${formatDate(rec.entryDate)}</span></div>
-      <div class="rr"><span>Exit Date</span><span>${formatDate(rec.exitDate)}</span></div>
-      <div class="rr bold"><span>Duration</span><span>${rec.days} Day${rec.days > 1 ? 's' : ''}</span></div>
+      <div class="rr"><span>Entry Time</span><span>${formatDate(rec.entryDate)}${entryTimeStr ? ' ' + entryTimeStr : ''}</span></div>
+      <div class="rr"><span>Exit Time</span><span>${formatDate(rec.exitDate)}${exitTimeStr ? ' ' + exitTimeStr : ''}</span></div>
+      <div class="rr bold"><span>Duration</span><span>${durDisplay}</span></div>
     </div>
     <div class="rs"><h3>Billing</h3>
-      <div class="rr"><span>Rate / Day</span><span>Rs.${dailyRate}.00</span></div>
-      <div class="rr"><span>Days</span><span>${rec.days}</span></div>
-      <div class="rr total"><span>TOTAL</span><span>Rs.${rec.amount.toLocaleString('en-IN')}.00</span></div>
+      <div class="rr"><span>Rate/Day</span><span>Rs.${dailyRate}.00</span></div>
+      <div class="rr total"><span>TOTAL DUE</span><span>Rs.${(amount || 0).toLocaleString('en-IN')}.00</span></div>
     </div>
     <div class="rf">
       <p>Printed: ${new Date().toLocaleString('en-IN')}</p>
@@ -470,11 +537,12 @@ function showExitReceipt(rec) {
     phone:      rec.phone   !== '--' ? rec.phone   : '',
     remarks:    rec.remarks !== '--' ? rec.remarks : '',
     entry_date: formatDate(rec.entryDate),
+    entry_time: entryTimeStr,
     exit_date:  formatDate(rec.exitDate),
-    duration:   rec.days + ' Day' + (rec.days > 1 ? 's' : ''),
-    days:       rec.days,
+    exit_time:  exitTimeStr,
+    duration:   durDisplay,
     rate:       dailyRate,
-    amount:     rec.amount
+    amount:     amount
   };
 
   document.getElementById('receiptOv').classList.add('open');
@@ -511,24 +579,20 @@ function printReceipt() {
     </style></head><body>${c}</body></html>`);
   w.document.close();
   setTimeout(() => w.print(), 300);
-
-  if (window._lastReceiptData) {
-    sendToPrinter(window._lastReceiptData);
-  }
+  if (window._lastReceiptData) sendToPrinter(window._lastReceiptData);
 }
 
 // ── RENDER: RECENTLY PARKED ───────────────────────────────────
 function renderRecent() {
   const el     = document.getElementById('recentList');
   const parked = db.filter(r => r.status === 'IN').slice(0, 5);
-
   if (!parked.length) {
     el.innerHTML = '<div class="empty"><div class="ei">P</div><p>No lorries parked yet</p></div>';
     return;
   }
-
   el.innerHTML = parked.map(r => {
-    const driverLine = r.driver !== '--' ? ` Driver: <b>${r.driver}</b>` : '';
+    const timeStr    = r.entryTime ? ' · <b>' + to12h(r.entryTime) + '</b>' : '';
+    const driverLine = r.driver !== '--' ? ` · Driver: <b>${r.driver}</b>` : '';
     const phoneLine  = r.phone  !== '--' ? ` · <span style="color:var(--blue)">${r.phone}</span>` : '';
     return `
       <div class="pk-card">
@@ -536,7 +600,7 @@ function renderRecent() {
           <span class="pk-token">#${r.token}</span>
           <span class="pk-lorry">${r.lorry}</span>
         </div>
-        <div class="pk-meta">Entered: <b>${r.entryDisplay}</b>${driverLine}${phoneLine}</div>
+        <div class="pk-meta">In: <b>${r.entryDisplay}</b>${timeStr}${driverLine}${phoneLine}</div>
         <div class="pk-foot">
           <div><div class="pk-due">--</div><div class="pk-days">Billing on exit</div></div>
           <button class="btn btn-sm btn-danger" onclick="goToExit(${r.token})">Exit</button>
@@ -548,28 +612,23 @@ function renderRecent() {
 // ── RENDER: CURRENTLY PARKED ──────────────────────────────────
 function renderParked(filter) {
   filter = filter || '';
-  const el  = document.getElementById('parkedList');
-  const cEl = document.getElementById('parkedCount');
+  const el   = document.getElementById('parkedList');
+  const cEl  = document.getElementById('parkedCount');
   let parked = db.filter(r => r.status === 'IN');
-
   if (filter) {
     const q = filter.toLowerCase();
-    parked = parked.filter(r =>
-      r.lorry.toLowerCase().includes(q) || String(r.token).includes(q)
-    );
+    parked  = parked.filter(r => r.lorry.toLowerCase().includes(q) || String(r.token).includes(q));
   }
-
   if (cEl) cEl.textContent = parked.length + ' lorr' + (parked.length !== 1 ? 'ies' : 'y');
-
   if (!parked.length) {
     el.innerHTML = `<div class="empty"><div class="ei">P</div><p>${filter ? 'No results' : 'No lorries parked'}</p></div>`;
     return;
   }
-
   const exitDate = document.getElementById('exitDateInput')?.value || new Date().toISOString().split('T')[0];
+  const exitTime = document.getElementById('exitTimeInput')?.value || liveTime24();
   el.innerHTML = parked.map(r => {
-    const days       = calcDays(r.entryDate, exitDate);
-    const amt        = calcAmt(days);
+    const bill       = calcBilling(r.entryDate, r.entryTime || '00:00', exitDate, exitTime);
+    const timeStr    = r.entryTime ? ' · <b>' + to12h(r.entryTime) + '</b>' : '';
     const driverLine = r.driver !== '--' ? `<br>Driver: <b>${r.driver}</b>` : '';
     const phoneLine  = r.phone  !== '--' ? ` · <span style="color:var(--blue)">${r.phone}</span>` : '';
     return `
@@ -578,11 +637,11 @@ function renderParked(filter) {
           <span class="pk-token">#${r.token}</span>
           <span class="pk-lorry">${r.lorry}</span>
         </div>
-        <div class="pk-meta">Entered: <b>${r.entryDisplay}</b>${driverLine}${phoneLine}</div>
+        <div class="pk-meta">In: <b>${r.entryDisplay}</b>${timeStr}${driverLine}${phoneLine}</div>
         <div class="pk-foot">
           <div>
-            <div class="pk-due">Rs.${amt.toLocaleString('en-IN')}</div>
-            <div class="pk-days">${days} day${days > 1 ? 's' : ''} parked</div>
+            <div class="pk-due">Rs.${bill.amount.toLocaleString('en-IN')}</div>
+            <div class="pk-days">${bill.display}</div>
           </div>
           <button class="btn btn-sm btn-danger" onclick="goToExit(${r.token})">Exit</button>
         </div>
@@ -593,6 +652,12 @@ function renderParked(filter) {
 function filterParked(val) { renderParked(val); }
 
 function goToExit(token) {
+  // Make sure exit time is set before switching
+  const et = document.getElementById('exitTimeInput');
+  if (et && !et.value) et.value = liveTime24();
+  const ed = document.getElementById('exitDateInput');
+  if (ed && !ed.value) ed.value = new Date().toISOString().split('T')[0];
+
   document.getElementById('exitToken').value = token;
   lookupToken(String(token));
   document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
@@ -615,37 +680,32 @@ function renderRecords() {
   const el = document.getElementById('recordsList');
   const q  = (document.getElementById('recSearch')?.value || '').toLowerCase();
   let recs = db.slice();
-
-  if (recFilterStatus !== 'all') {
-    recs = recs.filter(r => r.status === recFilterStatus);
-  }
-  if (q) {
-    recs = recs.filter(r =>
-      r.lorry.toLowerCase().includes(q)  ||
-      r.driver.toLowerCase().includes(q) ||
-      String(r.token).includes(q)
-    );
-  }
-
+  if (recFilterStatus !== 'all') recs = recs.filter(r => r.status === recFilterStatus);
+  if (q) recs = recs.filter(r =>
+    r.lorry.toLowerCase().includes(q) ||
+    r.driver.toLowerCase().includes(q) ||
+    String(r.token).includes(q)
+  );
   if (!recs.length) {
     el.innerHTML = '<div class="empty"><div class="ei">📋</div><p>No records found</p></div>';
     return;
   }
-
   el.innerHTML = recs.map(r => {
-    const isIn     = r.status === 'IN';
-    const amtText  = r.amount != null ? 'Rs.' + r.amount.toLocaleString('en-IN') : '--';
-    const phoneRow = r.phone !== '--'
+    const isIn         = r.status === 'IN';
+    const amtText      = r.amount != null ? 'Rs.' + r.amount.toLocaleString('en-IN') : '--';
+    const phoneRow     = r.phone !== '--'
       ? `<span><span style="font-size:9px">PHONE</span><b style="color:var(--blue)">${r.phone}</b></span>`
       : '<span></span>';
-
-    const entryBtn = isIn
+    const entryTimeStr = r.entryTime ? ' ' + to12h(r.entryTime) : '';
+    const exitTimeStr  = r.exitTime  ? ' ' + to12h(r.exitTime)  : '';
+    const entryFull    = r.entryDisplay + entryTimeStr;
+    const exitFull     = isIn ? '--' : (r.exitDisplay || '--') + exitTimeStr;
+    const entryBtn     = isIn
       ? `<button class="btn btn-sm btn-primary" onclick='showEntryReceipt(${JSON.stringify(r)})'>Receipt</button>`
       : '';
-    const exitBtn  = !isIn
+    const exitBtn      = !isIn
       ? `<button class="btn btn-sm btn-ghost" onclick='showExitReceipt(${JSON.stringify(r)})'>Receipt</button>`
       : '';
-
     return `
       <div class="rec-card ${isIn ? 'in' : 'out'}">
         <div class="rc-top">
@@ -656,8 +716,8 @@ function renderRecords() {
         <div class="rc-meta">
           <span><span style="font-size:9px">DRIVER</span><b>${r.driver}</b></span>
           ${phoneRow}
-          <span><span style="font-size:9px">ENTRY</span><b>${r.entryDisplay}</b></span>
-          <span><span style="font-size:9px">EXIT</span><b>${r.exitDisplay}</b></span>
+          <span><span style="font-size:9px">ENTRY</span><b>${entryFull}</b></span>
+          <span><span style="font-size:9px">EXIT</span><b>${exitFull}</b></span>
         </div>
         <div class="rc-foot">
           <div class="rc-amt">${amtText}</div>
@@ -680,8 +740,7 @@ function updateStats() {
                    .reduce((s, r) => s + (r.amount || 0), 0);
   const total  = db.length;
   const exited = db.filter(r => r.status === 'OUT').length;
-  const totRev = db.filter(r => r.status === 'OUT')
-                   .reduce((s, r) => s + (r.amount || 0), 0);
+  const totRev = db.filter(r => r.status === 'OUT').reduce((s, r) => s + (r.amount || 0), 0);
 
   const set = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
   set('s-parked',   parked);
@@ -697,15 +756,10 @@ function updateStats() {
 // ── DELETE / CLEAR ────────────────────────────────────────────
 async function deleteRecord(id) {
   if (!confirm('Delete this record?')) return;
-
   if (backendOnline) {
-    try {
-      await apiFetch(`/records/${id}`, { method: 'DELETE' });
-    } catch (e) {
-      notify('Server error: ' + e.message, 'error'); return;
-    }
+    try { await apiFetch(`/records/${id}`, { method: 'DELETE' }); }
+    catch (e) { notify('Server error: ' + e.message, 'error'); return; }
   }
-
   db = db.filter(r => r.id !== id);
   saveLocal();
   renderRecords(); updateStats(); refreshToken();
@@ -714,18 +768,10 @@ async function deleteRecord(id) {
 
 async function clearAllData() {
   if (!confirm('Delete ALL records permanently? This cannot be undone.')) return;
-
   if (backendOnline) {
-    try {
-      await apiFetch('/records', {
-        method: 'DELETE',
-        body:   JSON.stringify({ confirm: 'DELETE_ALL' })
-      });
-    } catch (e) {
-      notify('Server error: ' + e.message, 'error'); return;
-    }
+    try { await apiFetch('/records', { method: 'DELETE', body: JSON.stringify({ confirm: 'DELETE_ALL' }) }); }
+    catch (e) { notify('Server error: ' + e.message, 'error'); return; }
   }
-
   db = [];
   saveLocal();
   renderRecords(); renderRecent(); renderParked(); updateStats(); refreshToken();
@@ -738,64 +784,57 @@ function importExcel(event) {
   if (!file) return;
   const st = document.getElementById('importStatus');
   st.textContent = 'Reading file...';
-
   const reader = new FileReader();
   reader.onload = async function(e) {
     try {
       const wb   = XLSX.read(new Uint8Array(e.target.result), { type: 'array' });
       const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
       let added  = 0;
-
       if (backendOnline) {
         const payload = rows.map(row => ({
           lorry:     (row['Lorry Number'] || row['lorry'] || '').toString(),
-          driver:    row['Driver Name']   || row['driver']  || '--',
-          phone:     row['Driver Phone']  || row['phone']   || '--',
-          remarks:   row['Remarks']       || row['remarks'] || '--',
+          driver:    row['Driver Name']  || row['driver']  || '--',
+          phone:     row['Driver Phone'] || row['phone']   || '--',
+          remarks:   row['Remarks']      || row['remarks'] || '--',
           token:     row['Token'] ? parseInt(row['Token']) : undefined,
           entryDate: row['Entry Date'] ? new Date(row['Entry Date']).toISOString().split('T')[0] : undefined,
-          exitDate:  row['Exit Date']  ? new Date(row['Exit Date']).toISOString().split('T')[0]  : undefined
+          entryTime: row['Entry Time'] ? to24h(String(row['Entry Time'])) : undefined,
+          exitDate:  row['Exit Date']  ? new Date(row['Exit Date']).toISOString().split('T')[0]  : undefined,
+          exitTime:  row['Exit Time']  ? to24h(String(row['Exit Time']))  : undefined
         })).filter(r => r.lorry.trim());
-
-        const resp = await apiFetch('/import', {
-          method: 'POST',
-          body:   JSON.stringify({ records: payload })
-        });
+        const resp = await apiFetch('/import', { method: 'POST', body: JSON.stringify({ records: payload }) });
         added = resp.added;
         await syncFromServer();
-        if (resp.errors?.length) {
-          st.textContent = `Imported ${added} records. ${resp.errors.length} errors skipped.`;
-        } else {
-          st.textContent = `Imported ${added} records successfully!`;
-        }
+        st.textContent = resp.errors?.length
+          ? `Imported ${added} records. ${resp.errors.length} errors skipped.`
+          : `Imported ${added} records successfully!`;
       } else {
         let nxt = getNextToken();
         rows.forEach(row => {
           const lorry = (row['Lorry Number'] || row['lorry'] || '').toString().toUpperCase().trim();
           if (!lorry) return;
           const entryDate = row['Entry Date'] ? new Date(row['Entry Date']).toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
-          const exitDate  = row['Exit Date'] ? new Date(row['Exit Date']).toISOString().split('T')[0] : null;
-          const status    = exitDate ? 'OUT' : 'IN';
-          const days      = exitDate ? calcDays(entryDate, exitDate) : null;
+          const entryTime = row['Entry Time'] ? to24h(String(row['Entry Time'])) : null;
+          const exitDate  = row['Exit Date']  ? new Date(row['Exit Date']).toISOString().split('T')[0]  : null;
+          const exitTime  = row['Exit Time']  ? to24h(String(row['Exit Time']))  : null;
+          const bill      = exitDate ? calcBilling(entryDate, entryTime || '00:00', exitDate, exitTime || '23:59') : null;
           db.push({
             id: Date.now() + added,
             token: parseInt(row['Token']) || nxt++,
-            lorry, status, days,
+            lorry, status: exitDate ? 'OUT' : 'IN',
             driver:       row['Driver Name']  || '--',
             phone:        row['Driver Phone'] || '--',
             remarks:      row['Remarks']      || '--',
-            entryDate:    entryDate,
-            entryDisplay: formatDate(entryDate),
-            exitDate:     exitDate,
-            exitDisplay:  exitDate ? formatDate(exitDate) : '--',
-            amount:       days ? calcAmt(days) : null
+            entryDate, entryTime, entryDisplay: formatDate(entryDate),
+            exitDate,  exitTime,  exitDisplay:  exitDate ? formatDate(exitDate) : '--',
+            durationMin: bill ? bill.totalMin : null,
+            amount:      bill ? bill.amount   : null
           });
           added++;
         });
         saveLocal();
         st.textContent = `Imported ${added} records (offline)!`;
       }
-
       updateStats(); renderRecent(); refreshToken();
       notify('Imported ' + added + ' records', 'success');
     } catch (err) {
@@ -810,33 +849,31 @@ function importExcel(event) {
 function exportExcel(filter) {
   let recs  = db.slice();
   let fname = 'KPR_All';
-
   if (filter === 'in')  { recs = recs.filter(r => r.status === 'IN');  fname = 'KPR_Parked'; }
   if (filter === 'out') { recs = recs.filter(r => r.status === 'OUT'); fname = 'KPR_Exited'; }
-
   if (!recs.length) { notify('No records to export', 'error'); return; }
-
   const data = recs.map((r, i) => ({
     'Token No.':       '#' + (r.token || '--'),
     'S.No':            i + 1,
     'Lorry Number':    r.lorry,
     'Driver Name':     r.driver,
-    'Driver Phone':    r.phone  || '--',
+    'Driver Phone':    r.phone   || '--',
     'Remarks':         r.remarks,
-    'Entry Date':      r.entryDate ? formatDate(r.entryDate) : '--',
-    'Exit Date':       r.exitDate  ? formatDate(r.exitDate)  : '--',
-    'Duration (Days)': r.days   != null ? r.days   : '--',
-    'Rate/Day (Rs.)':  dailyRate,
+    'Entry Date':      r.entryDate  ? formatDate(r.entryDate) : '--',
+    'Entry Time':      r.entryTime  ? to12h(r.entryTime)      : '--',
+    'Exit Date':       r.exitDate   ? formatDate(r.exitDate)  : '--',
+    'Exit Time':       r.exitTime   ? to12h(r.exitTime)       : '--',
+    'Duration':        r.durationMin != null ? fmtDuration(r.durationMin) : '--',
+    'Rate/Day(Rs.)':  dailyRate,
     'Amount (Rs.)':    r.amount != null ? r.amount : '--',
     'Status':          r.status === 'IN' ? 'PARKED' : 'EXITED'
   }));
-
   const ws = XLSX.utils.json_to_sheet(data);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Records');
   ws['!cols'] = [
     {wch:10},{wch:5},{wch:16},{wch:16},{wch:14},{wch:20},
-    {wch:13},{wch:12},{wch:12},{wch:10},{wch:12},{wch:10}
+    {wch:13},{wch:11},{wch:12},{wch:11},{wch:22},{wch:12},{wch:12},{wch:10}
   ];
   XLSX.writeFile(wb, fname + '_' + new Date().toISOString().split('T')[0] + '.xlsx');
   notify('Exported ' + recs.length + ' records', 'success');
@@ -847,32 +884,35 @@ document.addEventListener('DOMContentLoaded', async function () {
   document.getElementById('dailyRateInput').value = dailyRate;
   document.getElementById('rateShow').textContent  = dailyRate;
 
-  initDateInputs();
-  updateStats();
-  refreshToken();
-  renderRecent();
+  // Set today + current time on all date/time inputs
+  const today = new Date().toISOString().split('T')[0];
+  const now   = liveTime24();
+  ['entryDateInput','exitDateInput'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.value = today;
+  });
+  ['entryTimeInput','exitTimeInput'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.value = now;
+  });
+
+  updateStats(); refreshToken(); renderRecent();
 
   await syncFromServer();
   showOnlineStatus();
-  updateStats();
-  refreshToken();
-  renderRecent();
+  updateStats(); refreshToken(); renderRecent();
 
   setInterval(async () => {
     await syncFromServer();
     showOnlineStatus();
     updateStats();
   }, 30000);
-  
-  // Re-calculate on exit date change
-  const exitDateInput = document.getElementById('exitDateInput');
-  if (exitDateInput) {
-    exitDateInput.addEventListener('change', function() {
+
+  // Re-calculate live amount when exit date or time changes
+  ['exitDateInput', 'exitTimeInput'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', () => {
       const token = document.getElementById('exitToken').value;
-      if (token) {
-        lookupToken(token);
-      }
+      if (token) lookupToken(token);
       renderParked();
     });
-  }
+  });
 });

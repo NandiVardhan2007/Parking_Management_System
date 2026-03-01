@@ -168,12 +168,10 @@
       </div>
 
       <div class="fg">
-        <label>Lorry Number *</label>
         <input
           type="text"
           id="entryLorry"
           class="inp-lorry"
-          placeholder="TN 01 AB 1234"
           autocomplete="off"
           autocorrect="off"
           spellcheck="false"
@@ -183,30 +181,30 @@
       <!-- Entry Date -->
       <div class="fg">
         <label>Entry Date * 📅</label>
-        <input type="date" id="entryDateInput" class="inp-date" required>
+        <input type="date" id="entryDateInput" class="inp-date">
         <div class="time-hint">Auto-filled with today · tap to change</div>
       </div>
 
       <!-- Entry Time (live, editable) -->
       <div class="fg">
         <label>Entry Time * 🕐</label>
-        <input type="time" id="entryTimeInput" required class="inp-time-full">
+        <input type="time" id="entryTimeInput" class="inp-time-full">
         <div class="time-hint">Live time auto-fills · tap to set manually</div>
       </div>
 
       <div class="fg">
         <label>Driver Name (Optional)</label>
-        <input type="text" id="entryDriver" placeholder="Driver name" autocomplete="name">
+        <input type="text" id="entryDriver" autocomplete="name">
       </div>
 
       <div class="fg">
         <label>Driver Phone (Optional)</label>
-        <input type="tel" id="entryPhone" placeholder="98765 43210" maxlength="15" autocomplete="tel">
+        <input type="tel" id="entryPhone" maxlength="15" autocomplete="tel">
       </div>
 
       <div class="fg">
         <label>Remarks (Optional)</label>
-        <input type="text" id="entryRemarks" placeholder="Goods type, notes...">
+        <input type="text" id="entryRemarks">
       </div>
 
       <button class="btn btn-primary" onclick="recordEntry()">🎫 Record Entry &amp; Print Receipt</button>
@@ -225,14 +223,12 @@
       <div class="card-title">🔓 Process Exit</div>
 
       <div class="fg">
-        <label>Enter Serial Number</label>
         <div style="position:relative">
           <span style="position:absolute;left:16px;top:50%;transform:translateY(-50%);font-family:'Share Tech Mono',monospace;font-size:22px;color:#f59e0b;pointer-events:none;font-weight:bold">#</span>
           <input
             type="number"
             id="exitToken"
             class="inp-token"
-            placeholder="  1"
             style="padding-left:42px"
             min="1"
             autocomplete="off"
@@ -243,12 +239,10 @@
 
       <!-- Lorry Number fallback search -->
       <div class="fg" style="margin-top:4px">
-        <label>— OR — Search by Lorry Number</label>
         <input
           type="text"
           id="exitLorrySearch"
           class="inp-lorry"
-          placeholder="TN 01 AB 1234"
           autocomplete="off"
           autocorrect="off"
           spellcheck="false"
@@ -291,7 +285,7 @@
 
     <div class="search-wrap">
       <span class="s-icon">🔍</span>
-      <input type="text" placeholder="Search serial or lorry..." oninput="filterParked(this.value)">
+      <input type="text" oninput="filterParked(this.value)">
     </div>
 
     <div id="parkedList"></div>
@@ -322,7 +316,7 @@
 
     <div class="search-wrap">
       <span class="s-icon">🔍</span>
-      <input type="text" id="recSearch" placeholder="Search lorry, driver, serial..." oninput="renderRecords()">
+      <input type="text" id="recSearch" oninput="renderRecords()">
     </div>
 
     <div class="pills">

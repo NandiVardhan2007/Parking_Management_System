@@ -82,7 +82,8 @@ function refreshToken() {
 
 // ── Rate ─────────────────────────────────────────────────────
 async function saveRate() {
-  const v = parseInt(document.getElementById('dailyRateInput').value) || 130;
+  const rateInput = document.getElementById('hourlyRateInput') || document.getElementById('dailyRateInput');
+  const v = parseInt(rateInput?.value) || 130;
   dailyRate = v;
   localStorage.setItem('kpr_rate', v);
   document.getElementById('rateShow').textContent = v;
@@ -934,7 +935,8 @@ function exportExcel(filter) {
 
 // ── INIT ──────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async function () {
-  document.getElementById('dailyRateInput').value = dailyRate;
+  const rateEl = document.getElementById('hourlyRateInput') || document.getElementById('dailyRateInput');
+  if (rateEl) rateEl.value = dailyRate;
   document.getElementById('rateShow').textContent  = dailyRate;
 
   // Set entry date/time to now; exit is always live

@@ -108,6 +108,33 @@
     .th-qr-wrap { text-align: center; padding: 10px 0 4px; }
     .th-qr-wrap img, .th-qr-wrap canvas { display: inline-block !important; }
     .th-upi    { font-size: 12px; font-weight: bold; margin-top: 6px; color: #000; }
+
+    /* ── Pull to Refresh ─────────────────────────────────── */
+    .ptr-indicator {
+      position: fixed;
+      top: 62px; /* below header */
+      left: 0; right: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      height: 52px;
+      background: #12161e;
+      color: #f59e0b;
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 13px;
+      letter-spacing: 1px;
+      transform: translateY(-52px);
+      transition: transform 0.2s ease;
+      z-index: 50;
+      border-bottom: 1px solid #1e2736;
+    }
+    .ptr-indicator.ptr-visible  { transform: translateY(0); }
+    .ptr-indicator.ptr-loading  { transform: translateY(0); }
+    .ptr-spinner { font-size: 18px; display: inline-block; transition: transform 0.2s; }
+    .ptr-indicator.ptr-ready .ptr-spinner  { transform: rotate(180deg); }
+    .ptr-indicator.ptr-loading .ptr-spinner { animation: ptr-spin 0.7s linear infinite; }
+    @keyframes ptr-spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
@@ -132,6 +159,10 @@
 </header>
 
 <!-- ============ APP BODY ============ -->
+<div class="ptr-indicator" id="ptrIndicator">
+  <div class="ptr-spinner" id="ptrSpinner">↓</div>
+  <span id="ptrText">Pull to refresh</span>
+</div>
 <div class="app-body" id="appBody">
 
   <!-- ======== ENTRY PANEL ======== -->

@@ -992,3 +992,67 @@ document.addEventListener('DOMContentLoaded', async function () {
   // Also sync when window regains focus (desktop browsers)
   window.addEventListener('focus', fullRefresh);
 });
+
+// ── Pull to Refresh ───────────────────────────────────────────
+(function initPullToRefresh() {
+  const THRESHOLD = 65;   // px to pull before release triggers refresh
+  let startY = 0, currentY = 0, pulling = false, refreshing = false;
+
+  const body     = document.getElementById('appBody');
+  const ptr      = document.getElementById('ptrIndicator');
+  const spinner  = document.getElementById('ptrSpinner');
+  const ptrText  = document.getElementById('ptrText');
+
+  if (!body || !ptr) return;
+
+  body.addEventListener('touchstart', (e) => {
+    if (body.scrollTop !== 0 || refreshing) return;
+    startY   = e.touches[0].clientY;
+    pulling  = true;
+  }, { passive: true });
+
+  body.addEventListener('touchmove', (e) => {
+    if (!pulling || refreshing) return;
+    currentY = e.touches[0].clientY;
+    const dist = Math.min(currentY - startY, THRESHOLD + 20);
+    if (dist <= 0) return;
+
+    const pct = Math.min(dist / THRESHOLD, 1);
+    ptr.style.transform = `translateY(${-52 + 52 * pct}px)`;
+    ptr.classList.add('ptr-visible');
+    ptr.classList.remove('ptr-ready', 'ptr-loading');
+    if (dist >= THRESHOLD) {
+      ptr.classList.add('ptr-ready');
+      ptrText.textContent = 'Release to refresh';
+    } else {
+      ptrText.textContent = 'Pull to refresh';
+    }
+    spinner.style.transform = `rotate(${pct * 180}deg)`;
+  }, { passive: true });
+
+  body.addEventListener('touchend', async () => {
+    if (!pulling) return;
+    pulling = false;
+    const dist = currentY - startY;
+    if (dist >= THRESHOLD && !refreshing) {
+      refreshing = true;
+      ptr.classList.add('ptr-loading');
+      ptr.classList.remove('ptr-ready');
+      ptr.style.transform = 'translateY(0)';
+      spinner.style.transform = '';
+      ptrText.textContent = 'Refreshing...';
+      await fullRefresh();
+      notify('Data refreshed', 'success');
+      refreshing = false;
+    }
+    // Snap back
+    ptr.style.transition = 'transform 0.25s ease';
+    ptr.style.transform  = 'translateY(-52px)';
+    setTimeout(() => {
+      ptr.classList.remove('ptr-visible', 'ptr-ready', 'ptr-loading');
+      ptr.style.transition = '';
+      ptrText.textContent = 'Pull to refresh';
+    }, 250);
+    startY = 0; currentY = 0;
+  }, { passive: true });
+})();

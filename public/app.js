@@ -23,10 +23,12 @@ const API = window.location.hostname === 'localhost' || window.location.hostname
 const PRINT_SECRET = 'KPR2024SECRET';
 
 // ── Data Store ───────────────────────────────────────────────
-let db              = JSON.parse(localStorage.getItem('kpr_db')   || '[]');
-let dailyRate       = parseInt(localStorage.getItem('kpr_rate')   || '130');
+// localStorage is a fallback ONLY for true offline — always prefer server data
+let db              = [];          // start empty, fill from server first
+let dailyRate       = parseInt(localStorage.getItem('kpr_rate') || '130');
 let recFilterStatus = 'all';
 let backendOnline   = false;
+let initialSyncDone = false;
 
 // ── API helpers ──────────────────────────────────────────────
 async function apiFetch(path, opts = {}) {
@@ -48,9 +50,20 @@ async function syncFromServer() {
     db         = records.data;
     dailyRate  = parseFloat(settings.data.hourly_rate) || 130;
     saveLocal();
-    backendOnline = true;
+    backendOnline   = true;
+    initialSyncDone = true;
+    // Update rate input if visible
+    const rateEl = document.getElementById('hourlyRateInput') || document.getElementById('dailyRateInput');
+    if (rateEl) rateEl.value = dailyRate;
+    const rateShow = document.getElementById('rateShow');
+    if (rateShow) rateShow.textContent = dailyRate;
   } catch (_) {
     backendOnline = false;
+    if (!initialSyncDone) {
+      // First load failed — fall back to localStorage so app still works offline
+      db = JSON.parse(localStorage.getItem('kpr_db') || '[]');
+      initialSyncDone = true;
+    }
     showOnlineStatus();
   }
 }
@@ -934,12 +947,18 @@ function exportExcel(filter) {
 }
 
 // ── INIT ──────────────────────────────────────────────────────
+async function fullRefresh() {
+  await syncFromServer();
+  showOnlineStatus();
+  updateStats(); refreshToken(); renderRecent(); renderParked(); renderRecords();
+}
+
 document.addEventListener('DOMContentLoaded', async function () {
+  // Init UI inputs immediately
   const rateEl = document.getElementById('hourlyRateInput') || document.getElementById('dailyRateInput');
   if (rateEl) rateEl.value = dailyRate;
-  document.getElementById('rateShow').textContent  = dailyRate;
+  document.getElementById('rateShow').textContent = dailyRate;
 
-  // Set entry date/time to now; exit is always live
   const today = new Date().toISOString().split('T')[0];
   const now   = liveTime24();
   const _ed = document.getElementById('entryDateInput');
@@ -947,25 +966,29 @@ document.addEventListener('DOMContentLoaded', async function () {
   if (_ed) _ed.value = today;
   if (_et) _et.value = now;
   syncExitDateTime();
-
-  // Mark manual edit when user changes entry date/time
   if (_ed) _ed.addEventListener('change', () => { entryDateManual = true; });
   if (_et) _et.addEventListener('change', () => { entryTimeManual = true; });
-  // Reset manual flags when clearEntry() is called (handled in clearEntry)
 
   startEntryTimeTick();
 
-  updateStats(); refreshToken(); renderRecent();
+  // Sync from server FIRST — don't show stale localStorage data
+  await fullRefresh();
 
-  await syncFromServer();
-  showOnlineStatus();
-  updateStats(); refreshToken(); renderRecent();
+  // Auto-sync every 15 seconds
+  setInterval(fullRefresh, 15000);
 
-  setInterval(async () => {
-    await syncFromServer();
-    showOnlineStatus();
-    updateStats();
-  }, 30000);
+  // ── Re-sync whenever the page becomes visible again ──
+  // This handles: switching back from another app, opening from recents,
+  // returning from screen-off, or forward/back navigation on mobile
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') fullRefresh();
+  });
 
-  // Exit date/time are always live (hidden fields) — no listeners needed
+  // Handles back-forward cache (bfcache) on iOS Safari
+  window.addEventListener('pageshow', (e) => {
+    if (e.persisted) fullRefresh();
+  });
+
+  // Also sync when window regains focus (desktop browsers)
+  window.addEventListener('focus', fullRefresh);
 });

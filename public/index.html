@@ -9,6 +9,7 @@
   <title>KPR Transport</title>
   <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Share+Tech+Mono&family=Exo+2:wght@300;400;600;700&display=swap" rel="stylesheet">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <link rel="stylesheet" href="style.css">
   <style>
     /* ── Time input row ─────────────────────────────────────── */
@@ -39,6 +40,26 @@
       border-color: #22c55e;
       box-shadow: 0 0 0 3px rgba(34,197,94,.18);
     }
+    .inp-time-full {
+      width: 100%;
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 18px;
+      font-weight: 600;
+      color: #f59e0b;
+      letter-spacing: 1px;
+      background: #12161e;
+      border: 1.5px solid #1e2736;
+      border-radius: 12px;
+      padding: 13px 16px;
+      outline: none;
+      transition: border-color .2s;
+      -webkit-appearance: none;
+    }
+    .inp-time-full:focus { border-color: #f59e0b; }
+    .inp-time-full.time-flash {
+      border-color: #22c55e;
+      box-shadow: 0 0 0 3px rgba(34,197,94,.18);
+    }
     .btn-now {
       flex-shrink: 0;
       background: #1e2736;
@@ -61,6 +82,32 @@
       margin-top: 4px;
       font-family: 'Share Tech Mono', monospace;
     }
+
+    /* ── Thermal Receipt Styles ─────────────────────────────── */
+    .th-receipt {
+      background: #fff;
+      color: #000;
+      font-family: "Courier New", monospace;
+      padding: 14px;
+      border-radius: 8px;
+      width: 100%;
+      max-width: 300px;
+      margin: 0 auto;
+    }
+    .th-header { text-align: center; padding-bottom: 6px; }
+    .th-title  { font-size: 16px; font-weight: bold; letter-spacing: 1px; }
+    .th-sub    { font-size: 12px; margin-top: 2px; color: #222; }
+    .th-dash   { border-top: 1px dashed #000; margin: 6px 0; }
+    .th-type   { text-align: center; font-weight: bold; font-size: 14px; padding: 4px 0; }
+    .th-table  { width: 100%; font-size: 13px; border-collapse: collapse; }
+    .th-table td { padding: 3px 4px; vertical-align: top; color: #000; }
+    .th-table td:first-child { white-space: nowrap; font-weight: bold; width: 108px; }
+    .th-total-row td { font-size: 14px; font-weight: bold; border-top: 1px dashed #000; padding-top: 6px; }
+    .th-note   { font-size: 11px; line-height: 1.7; padding: 4px 2px; color: #333; }
+    .th-footer { text-align: center; font-weight: bold; font-size: 13px; padding: 6px 0; letter-spacing: 1px; }
+    .th-qr-wrap { text-align: center; padding: 10px 0 4px; }
+    .th-qr-wrap img, .th-qr-wrap canvas { display: inline-block !important; }
+    .th-upi    { font-size: 12px; font-weight: bold; margin-top: 6px; color: #000; }
   </style>
 </head>
 <body>
@@ -114,7 +161,7 @@
 
       <div class="token-banner">
         <div>
-          <div class="lbl">Next Token No.</div>
+          <div class="lbl">Next Serial No.</div>
           <div class="val" id="nextToken">#1</div>
         </div>
         <div class="ico">🎫</div>
@@ -137,16 +184,14 @@
       <div class="fg">
         <label>Entry Date * 📅</label>
         <input type="date" id="entryDateInput" class="inp-date" required>
+        <div class="time-hint">Auto-filled with today · tap to change</div>
       </div>
 
-      <!-- Entry Time (live default, editable) -->
+      <!-- Entry Time (live, editable) -->
       <div class="fg">
         <label>Entry Time * 🕐</label>
-        <div class="time-row">
-          <input type="time" id="entryTimeInput" required>
-          <button class="btn-now" onclick="resetToNow('entryTimeInput')" title="Reset to current time">↺ Now</button>
-        </div>
-        <div class="time-hint">Defaults to current time · tap to edit manually</div>
+        <input type="time" id="entryTimeInput" required class="inp-time-full">
+        <div class="time-hint">Live time auto-fills · tap to set manually</div>
       </div>
 
       <div class="fg">
@@ -180,7 +225,7 @@
       <div class="card-title">🔓 Process Exit</div>
 
       <div class="fg">
-        <label>Enter Token Number</label>
+        <label>Enter Serial Number</label>
         <div style="position:relative">
           <span style="position:absolute;left:16px;top:50%;transform:translateY(-50%);font-family:'Share Tech Mono',monospace;font-size:22px;color:#f59e0b;pointer-events:none;font-weight:bold">#</span>
           <input
@@ -196,25 +241,24 @@
         </div>
       </div>
 
-      <!-- Exit Date -->
-      <div class="fg">
-        <label>Exit Date * 📅</label>
+      <!-- Lorry Number fallback search -->
+      <div class="fg" style="margin-top:4px">
+        <label>— OR — Search by Lorry Number</label>
         <input
-          type="date"
-          id="exitDateInput"
-          class="inp-date"
-          required>
+          type="text"
+          id="exitLorrySearch"
+          class="inp-lorry"
+          placeholder="TN 01 AB 1234"
+          autocomplete="off"
+          autocorrect="off"
+          spellcheck="false"
+          oninput="this.value=this.value.toUpperCase(); lookupByLorry(this.value)"
+          style="letter-spacing:1.5px">
+        <div class="time-hint">Driver forgot serial no? Enter lorry number to find it</div>
       </div>
-
-      <!-- Exit Time (live default, editable) -->
-      <div class="fg">
-        <label>Exit Time * 🕐</label>
-        <div class="time-row">
-          <input type="time" id="exitTimeInput" required>
-          <button class="btn-now" onclick="resetToNow('exitTimeInput')" title="Reset to current time">↺ Now</button>
-        </div>
-        <div class="time-hint">Defaults to current time · tap to edit manually</div>
-      </div>
+      <!-- Exit date/time are always current — no manual input needed -->
+      <input type="hidden" id="exitDateInput">
+      <input type="hidden" id="exitTimeInput">
 
       <!-- Error box -->
       <div class="err-box" id="exitError"></div>
@@ -224,7 +268,7 @@
         <div class="lk-head">
           <div class="lk-token" id="lkToken">#--</div>
           <div>
-            <div class="lk-badge">Token Found ✓</div>
+            <div class="lk-badge">Record Found ✓</div>
             <div class="lk-lorry" id="lkLorry">--</div>
           </div>
         </div>
@@ -247,7 +291,7 @@
 
     <div class="search-wrap">
       <span class="s-icon">🔍</span>
-      <input type="text" placeholder="Search token or lorry..." oninput="filterParked(this.value)">
+      <input type="text" placeholder="Search serial or lorry..." oninput="filterParked(this.value)">
     </div>
 
     <div id="parkedList"></div>
@@ -278,7 +322,7 @@
 
     <div class="search-wrap">
       <span class="s-icon">🔍</span>
-      <input type="text" id="recSearch" placeholder="Search lorry, driver, token..." oninput="renderRecords()">
+      <input type="text" id="recSearch" placeholder="Search lorry, driver, serial..." oninput="renderRecords()">
     </div>
 
     <div class="pills">
@@ -337,7 +381,7 @@
       <div class="io-ico">📤</div>
       <div class="io-title">Export to Excel</div>
       <div class="io-desc">
-        Download records with Token, Lorry, Driver, Phone, Entry/Exit Date &amp; Time, Duration and Amount.
+        Download records with Serial No, Lorry, Driver, Phone, Entry/Exit Date &amp; Time, Duration and Amount.
       </div>
       <button class="btn btn-success" onclick="exportExcel('all')">📊 Export All Records</button>
       <button class="btn btn-ghost"   onclick="exportExcel('in')">🅿 Export Parked Only</button>

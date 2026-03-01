@@ -170,28 +170,40 @@ function calcBilling(entryDate, entryTime, exitDate, exitTime) {
 function initAllDateTimeInputs() {
   const today = new Date().toISOString().split('T')[0];
   const now   = liveTime24();
-  [
-    ['entryDateInput', today],
-    ['entryTimeInput', now  ],
-    ['exitDateInput',  today],
-    ['exitTimeInput',  now  ],
-  ].forEach(([id, val]) => {
-    const el = document.getElementById(id);
-    if (el && !el.value) el.value = val;
-  });
+  const ed = document.getElementById('entryDateInput');
+  const et = document.getElementById('entryTimeInput');
+  if (ed && !ed.value) ed.value = today;
+  if (et && !et.value) et.value = now;
+  // Exit date/time always use current time — updated via syncExitDateTime()
+  syncExitDateTime();
 }
 
-/** Reset one time input to current live time with a brief flash */
-function resetToNow(inputId) {
-  const el = document.getElementById(inputId);
-  if (!el) return;
-  el.value = liveTime24();
-  el.classList.add('time-flash');
-  setTimeout(() => el.classList.remove('time-flash'), 600);
-  // Re-run lookup / parked list if on exit tab
-  const token = document.getElementById('exitToken')?.value;
-  if (inputId === 'exitTimeInput' && token) lookupToken(token);
-  if (inputId === 'exitTimeInput') renderParked();
+/** Always keep hidden exit date/time in sync with live clock */
+function syncExitDateTime() {
+  const ed = document.getElementById('exitDateInput');
+  const et = document.getElementById('exitTimeInput');
+  if (ed) ed.value = new Date().toISOString().split('T')[0];
+  if (et) et.value = liveTime24();
+}
+
+/** Track if user manually changed entry time/date */
+let entryTimeManual = false;
+let entryDateManual = false;
+
+/** Live auto-tick for entry time — stops once user manually edits */
+function startEntryTimeTick() {
+  setInterval(() => {
+    if (!entryTimeManual) {
+      const et = document.getElementById('entryTimeInput');
+      if (et) et.value = liveTime24();
+    }
+    if (!entryDateManual) {
+      const ed = document.getElementById('entryDateInput');
+      if (ed) ed.value = new Date().toISOString().split('T')[0];
+    }
+    // Keep exit date/time always current
+    syncExitDateTime();
+  }, 10000); // refresh every 10s
 }
 
 // ── Navigation ───────────────────────────────────────────────
@@ -202,11 +214,7 @@ function goTab(tab, btn) {
   btn.classList.add('active');
   document.getElementById('appBody').scrollTop = 0;
   if (tab === 'exit') {
-    // Reset exit date+time to now if blank
-    const ed = document.getElementById('exitDateInput');
-    const et = document.getElementById('exitTimeInput');
-    if (ed && !ed.value) ed.value = new Date().toISOString().split('T')[0];
-    if (et && !et.value) et.value = liveTime24();
+    syncExitDateTime();
     renderParked();
   }
   if (tab === 'records') renderRecords();
@@ -238,11 +246,11 @@ async function recordEntry() {
   if (!lorry) { notify('Enter lorry number!', 'error'); return; }
 
   const dup = db.find(r => r.lorry === lorry && r.status === 'IN');
-  if (dup) { notify('WARNING: ' + lorry + ' already parked! Token #' + dup.token, 'error'); return; }
+  if (dup) { notify('WARNING: ' + lorry + ' already parked! Serial #' + dup.token, 'error'); return; }
 
-  const entryDate = document.getElementById('entryDateInput').value;
+  const entryDate = document.getElementById('entryDateInput').value || new Date().toISOString().split('T')[0];
   const entryTime = document.getElementById('entryTimeInput').value || liveTime24();
-  if (!entryDate) { notify('Select entry date!', 'error'); return; }
+  // Always have a live fallback — no error needed
 
   const payload = {
     lorry,
@@ -282,7 +290,7 @@ async function recordEntry() {
   }
 
   updateStats(); refreshToken(); renderRecent();
-  notify('Token #' + rec.token + ' — ' + lorry + ' entered', 'success');
+  notify('Serial #' + rec.token + ' — ' + lorry + ' entered', 'success');
   showEntryReceipt(rec);
   clearEntry();
 }
@@ -291,6 +299,9 @@ function clearEntry() {
   ['entryLorry', 'entryDriver', 'entryPhone', 'entryRemarks'].forEach(id => {
     document.getElementById(id).value = '';
   });
+  // Reset date/time back to live auto-fill
+  entryDateManual = false;
+  entryTimeManual = false;
   document.getElementById('entryDateInput').value = new Date().toISOString().split('T')[0];
   document.getElementById('entryTimeInput').value = liveTime24();
 }
@@ -307,12 +318,12 @@ function lookupToken(val) {
 
   const rec = db.find(r => r.token === num);
   if (!rec) {
-    errEl.textContent   = 'Token #' + num + ' not found.';
+    errEl.textContent   = 'Serial #' + num + ' not found.';
     errEl.style.display = 'block';
     return;
   }
   if (rec.status === 'OUT') {
-    errEl.textContent   = 'Token #' + num + ' (' + rec.lorry + ') already exited on ' + rec.exitDisplay;
+    errEl.textContent   = 'Serial #' + num + ' (' + rec.lorry + ') already exited on ' + rec.exitDisplay;
     errEl.style.display = 'block';
     return;
   }
@@ -344,8 +355,45 @@ function lookupToken(val) {
   card.style.display = 'block';
 }
 
+// ── EXIT — LOOKUP BY LORRY NUMBER ────────────────────────────
+function lookupByLorry(val) {
+  const errEl   = document.getElementById('exitError');
+  const card    = document.getElementById('lookupCard');
+  const lorryIn = val.trim().toUpperCase();
+
+  if (!lorryIn) {
+    errEl.style.display = 'none';
+    card.style.display  = 'none';
+    return;
+  }
+
+  // Find all currently parked vehicles matching the lorry number
+  const matches = db.filter(r => r.lorry === lorryIn && r.status === 'IN');
+
+  if (!matches.length) {
+    // Maybe it already exited?
+    const exited = db.find(r => r.lorry === lorryIn && r.status === 'OUT');
+    errEl.textContent   = exited
+      ? `${lorryIn} already exited (Token #${exited.token})`
+      : `No active parking record found for "${lorryIn}".`;
+    errEl.style.display = 'block';
+    card.style.display  = 'none';
+    document.getElementById('exitToken').value = '';
+    return;
+  }
+
+  // Pick the latest entry (highest token) if multiple
+  const rec = matches.reduce((a, b) => (a.token > b.token ? a : b));
+
+  errEl.style.display = 'none';
+  // Fill token field and trigger normal lookup
+  document.getElementById('exitToken').value = rec.token;
+  lookupToken(String(rec.token));
+}
+
 function clearExitForm() {
   document.getElementById('exitToken').value          = '';
+  document.getElementById('exitLorrySearch').value    = '';
   document.getElementById('exitError').style.display  = 'none';
   document.getElementById('lookupCard').style.display = 'none';
   document.getElementById('exitDateInput').value = new Date().toISOString().split('T')[0];
@@ -368,8 +416,8 @@ async function processExit() {
   if (idx === -1) {
     const gone = db.find(r => r.token === num);
     errEl.textContent   = gone
-      ? 'Token #' + num + ' (' + gone.lorry + ') already exited.'
-      : 'Token #' + num + ' not found.';
+      ? 'Serial #' + num + ' (' + gone.lorry + ') already exited.'
+      : 'Serial #' + num + ' not found.';
     errEl.style.display = 'block'; return;
   }
 
@@ -404,7 +452,7 @@ async function processExit() {
   updateStats(); renderParked(); renderRecent();
   showExitReceipt(rec);
   clearExitForm();
-  notify('Token #' + num + ' exited — Rs.' + rec.amount, 'success');
+  notify('Serial #' + num + ' exited — Rs.' + rec.amount, 'success');
 }
 
 // ── PRINT QUEUE ──────────────────────────────────────────────
@@ -435,33 +483,42 @@ function showEntryReceipt(rec) {
   const remarkRow = rec.remarks !== '--' ? `<div class="rr"><span>Remarks</span><span>${rec.remarks}</span></div>` : '';
   const timeStr   = rec.entryTime ? to12h(rec.entryTime) : to12h(liveTime24());
 
+  const driverRow2 = rec.driver !== '--' ? `<tr><td>Driver&nbsp;&nbsp;&nbsp;:</td><td>${rec.driver}</td></tr>` : '';
+  const mobileRow2 = rec.phone  !== '--' ? `<tr><td>Mobile&nbsp;&nbsp;&nbsp;:</td><td>${rec.phone}</td></tr>` : '';
+  const remarksRow2 = rec.remarks !== '--' ? `<tr><td colspan="2" style="padding-top:4px;font-size:12px;color:#555">${rec.remarks}</td></tr>` : '';
+
   document.getElementById('receiptContent').innerHTML =
-    `<div class="rh">
-      <h1>KPR TRANSPORT</h1>
-      <p>PARKING MANAGEMENT SYSTEM</p>
-      <p style="margin-top:5px;letter-spacing:2px">*** ENTRY RECEIPT ***</p>
-    </div>
-    <div class="tok-blk">
-      <div class="tok-lab">Parking Token No.</div>
-      <div class="tok-num">#${rec.token}</div>
-      <div class="tok-hint">Please keep this receipt for exit</div>
-    </div>
-    <div class="rs"><h3>Vehicle Details</h3>
-      <div class="rr bold"><span>Lorry No</span><span>${rec.lorry}</span></div>
-      <div class="rr"><span>Driver Name</span><span>${rec.driver}</span></div>
-      ${phoneRow}${remarkRow}
-    </div>
-    <div class="rs"><h3>Entry Details</h3>
-      <div class="rr"><span>Entry Date</span><span>${formatDate(rec.entryDate)}</span></div>
-      <div class="rr"><span>Entry Time</span><span>${timeStr}</span></div>
-    </div>
-    <div class="rs"><h3>Billing Info</h3>
-      <div class="rr"><span>Rate/Day</span><span>Rs.${dailyRate}.00</span></div>
-      <div class="rr"><span>Payment</span><span>On Exit</span></div>
-    </div>
-    <div class="rf">
-      <p>Printed: ${new Date().toLocaleString('en-IN')}</p>
-      <p style="margin-top:4px">Thank you for choosing KPR Transport</p>
+    `<div class="th-receipt">
+      <div class="th-header">
+        <div class="th-title">KPR TRUCK PARKING</div>
+        <div class="th-sub">Beside DRK College, Bowrampet</div>
+        <div class="th-sub">Ph: 9640019275 | 8885519275</div>
+      </div>
+      <div class="th-dash"></div>
+      <div class="th-type">**ENTRY RECEIPT**</div>
+      <div class="th-dash"></div>
+      <table class="th-table">
+        <tr><td>Serial No&nbsp;:</td><td><b>#${rec.token}</b></td></tr>
+        <tr><td>Vehicle No:</td><td><b>${rec.lorry}</b></td></tr>
+        ${driverRow2}
+        ${mobileRow2}
+      </table>
+      <div class="th-dash"></div>
+      <table class="th-table">
+        <tr><td>Entry Date :</td><td>${formatDate(rec.entryDate)}</td></tr>
+        <tr><td>Entry Time :</td><td>${timeStr}</td></tr>
+        <tr><td>Per Day&nbsp;&nbsp;&nbsp;:</td><td><b>₹${dailyRate}</b></td></tr>
+        ${remarksRow2}
+      </table>
+      <div class="th-dash"></div>
+      <div class="th-note">
+        <b>Note:</b><br>
+        Management is not responsible<br>
+        for any loss, theft, or damage<br>
+        to vehicle or its contents.
+      </div>
+      <div class="th-dash"></div>
+      <div class="th-footer">THANK YOU - DRIVE SAFE</div>
     </div>`;
 
   window._lastReceiptData = {
@@ -477,7 +534,7 @@ function showEntryReceipt(rec) {
   };
 
   document.getElementById('receiptOv').classList.add('open');
-  sendToPrinter(window._lastReceiptData);
+  // Print is only sent when user taps the 🖨 Print button
 }
 
 function showExitReceipt(rec) {
@@ -500,34 +557,49 @@ function showExitReceipt(rec) {
     amount     = bill.amount;
   }
 
+  const driverRowX  = rec.driver  !== '--' ? `<tr><td>Driver&nbsp;&nbsp;&nbsp;:</td><td>${rec.driver}</td></tr>` : '';
+  const mobileRowX  = rec.phone   !== '--' ? `<tr><td>Mobile&nbsp;&nbsp;&nbsp;:</td><td>${rec.phone}</td></tr>` : '';
+  const upiUrl      = `upi://pay?pa=9640019275@ybl&pn=KPR%20Truck%20Parking&am=${amount || 0}&cu=INR`;
+
   document.getElementById('receiptContent').innerHTML =
-    `<div class="rh">
-      <h1>KPR TRANSPORT</h1>
-      <p>PARKING MANAGEMENT SYSTEM</p>
-      <p style="margin-top:5px;letter-spacing:2px">*** EXIT RECEIPT ***</p>
-    </div>
-    <div class="tok-blk">
-      <div class="tok-lab">Parking Token No.</div>
-      <div class="tok-num">#${rec.token}</div>
-    </div>
-    <div class="rs"><h3>Vehicle Details</h3>
-      <div class="rr bold"><span>Lorry No</span><span>${rec.lorry}</span></div>
-      <div class="rr"><span>Driver</span><span>${rec.driver}</span></div>
-      ${phoneRow}${remarkRow}
-    </div>
-    <div class="rs"><h3>Parking Duration</h3>
-      <div class="rr"><span>Entry Time</span><span>${formatDate(rec.entryDate)}${entryTimeStr ? ' ' + entryTimeStr : ''}</span></div>
-      <div class="rr"><span>Exit Time</span><span>${formatDate(rec.exitDate)}${exitTimeStr ? ' ' + exitTimeStr : ''}</span></div>
-      <div class="rr bold"><span>Duration</span><span>${durDisplay}</span></div>
-    </div>
-    <div class="rs"><h3>Billing</h3>
-      <div class="rr"><span>Rate/Day</span><span>Rs.${dailyRate}.00</span></div>
-      <div class="rr total"><span>TOTAL DUE</span><span>Rs.${(amount || 0).toLocaleString('en-IN')}.00</span></div>
-    </div>
-    <div class="rf">
-      <p>Printed: ${new Date().toLocaleString('en-IN')}</p>
-      <p style="margin-top:4px">Thank you for using KPR Transport Parking</p>
+    `<div class="th-receipt">
+      <div class="th-header">
+        <div class="th-title">KPR TRUCK PARKING</div>
+        <div class="th-sub">Beside DRK College, Bowrampet</div>
+        <div class="th-sub">Ph: 9640019275 | 8885519275</div>
+      </div>
+      <div class="th-dash"></div>
+      <div class="th-type">**EXIT RECEIPT**</div>
+      <div class="th-dash"></div>
+      <table class="th-table">
+        <tr><td>Serial No&nbsp;:</td><td><b>#${rec.token}</b></td></tr>
+        <tr><td>Vehicle No:</td><td><b>${rec.lorry}</b></td></tr>
+        ${driverRowX}
+        ${mobileRowX}
+      </table>
+      <div class="th-dash"></div>
+      <table class="th-table">
+        <tr><td>Entry Date :</td><td>${formatDate(rec.entryDate)}</td></tr>
+        <tr><td>Entry Time :</td><td>${entryTimeStr || '--'}</td></tr>
+        <tr><td>Exit Date&nbsp;:</td><td>${formatDate(rec.exitDate)}</td></tr>
+        <tr><td>Exit Time&nbsp;:</td><td>${exitTimeStr}</td></tr>
+        <tr class="th-total-row"><td>Total Paid :</td><td><b>₹${(amount || 0).toLocaleString('en-IN')}</b></td></tr>
+      </table>
+      <div class="th-dash"></div>
+      <div class="th-footer">THANK YOU - DRIVE SAFE</div>
+      <div class="th-qr-wrap">
+        <div id="receiptQR" data-upi="${upiUrl}"></div>
+        <div class="th-upi">PhonePe/GPay: 9640019275</div>
+      </div>
     </div>`;
+
+  // Generate QR code for UPI payment
+  setTimeout(() => {
+    const qrEl = document.getElementById('receiptQR');
+    if (qrEl && typeof QRCode !== 'undefined') {
+      new QRCode(qrEl, { text: upiUrl, width: 128, height: 128, colorDark: '#000', colorLight: '#fff' });
+    }
+  }, 50);
 
   window._lastReceiptData = {
     type:       'exit',
@@ -546,7 +618,7 @@ function showExitReceipt(rec) {
   };
 
   document.getElementById('receiptOv').classList.add('open');
-  sendToPrinter(window._lastReceiptData);
+  // Print is only sent when user taps the 🖨 Print button
 }
 
 function closeReceipt() {
@@ -556,30 +628,11 @@ function closeReceipt() {
 }
 
 function printReceipt() {
-  const c = document.getElementById('receiptContent').innerHTML;
-  const w = window.open('', '_blank', 'width=400,height=650');
-  w.document.write(`<!DOCTYPE html><html><head><title>KPR Receipt</title>
-    <style>
-    *{margin:0;padding:0;box-sizing:border-box}
-    body{font-family:"Courier New",monospace;padding:16px;max-width:380px}
-    .rh{text-align:center;border-bottom:2px dashed #bbb;padding-bottom:12px;margin-bottom:12px}
-    h1{font-size:20px;letter-spacing:3px}
-    p{font-size:11px;color:#666;margin-top:2px}
-    .tok-blk{text-align:center;padding:12px;border:2px dashed #aaa;border-radius:6px;margin:12px 0}
-    .tok-num{font-size:48px;font-weight:bold;letter-spacing:4px}
-    .tok-lab{font-size:10px;text-transform:uppercase;letter-spacing:3px;color:#666}
-    .tok-hint{font-size:10px;color:#888;margin-top:3px}
-    .rs{border-top:1px dashed #ccc;padding-top:8px;margin-top:8px}
-    h3{font-size:10px;text-transform:uppercase;letter-spacing:2px;color:#666;margin-bottom:7px}
-    .rr{display:flex;justify-content:space-between;margin:4px 0;font-size:13px}
-    .rr.bold{font-weight:bold}
-    .rr.total{border-top:2px solid #111;border-bottom:2px solid #111;padding:6px 0;margin-top:6px;font-size:16px;font-weight:bold}
-    .rf{text-align:center;border-top:2px dashed #bbb;padding-top:10px;margin-top:12px;font-size:10px;color:#666}
-    @media print{body{padding:0}}
-    </style></head><body>${c}</body></html>`);
-  w.document.close();
-  setTimeout(() => w.print(), 300);
-  if (window._lastReceiptData) sendToPrinter(window._lastReceiptData);
+  if (window._lastReceiptData) {
+    sendToPrinter(window._lastReceiptData);
+  } else {
+    notify('No receipt data to print', 'warn');
+  }
 }
 
 // ── RENDER: RECENTLY PARKED ───────────────────────────────────
@@ -884,15 +937,21 @@ document.addEventListener('DOMContentLoaded', async function () {
   document.getElementById('dailyRateInput').value = dailyRate;
   document.getElementById('rateShow').textContent  = dailyRate;
 
-  // Set today + current time on all date/time inputs
+  // Set entry date/time to now; exit is always live
   const today = new Date().toISOString().split('T')[0];
   const now   = liveTime24();
-  ['entryDateInput','exitDateInput'].forEach(id => {
-    const el = document.getElementById(id); if (el) el.value = today;
-  });
-  ['entryTimeInput','exitTimeInput'].forEach(id => {
-    const el = document.getElementById(id); if (el) el.value = now;
-  });
+  const _ed = document.getElementById('entryDateInput');
+  const _et = document.getElementById('entryTimeInput');
+  if (_ed) _ed.value = today;
+  if (_et) _et.value = now;
+  syncExitDateTime();
+
+  // Mark manual edit when user changes entry date/time
+  if (_ed) _ed.addEventListener('change', () => { entryDateManual = true; });
+  if (_et) _et.addEventListener('change', () => { entryTimeManual = true; });
+  // Reset manual flags when clearEntry() is called (handled in clearEntry)
+
+  startEntryTimeTick();
 
   updateStats(); refreshToken(); renderRecent();
 
@@ -906,13 +965,5 @@ document.addEventListener('DOMContentLoaded', async function () {
     updateStats();
   }, 30000);
 
-  // Re-calculate live amount when exit date or time changes
-  ['exitDateInput', 'exitTimeInput'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.addEventListener('change', () => {
-      const token = document.getElementById('exitToken').value;
-      if (token) lookupToken(token);
-      renderParked();
-    });
-  });
+  // Exit date/time are always live (hidden fields) — no listeners needed
 });

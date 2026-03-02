@@ -22,6 +22,11 @@ const API = window.location.hostname === 'localhost' || window.location.hostname
 
 const PRINT_SECRET = 'KPR2024SECRET';
 
+// ── Google Sheets Backup ─────────────────────────────────────
+// Handled by Flask backend (server.py). Set env vars on Render:
+//   GSHEET_ENTRY_URL = your entry sheet Apps Script URL
+//   GSHEET_EXIT_URL  = your exit sheet Apps Script URL
+
 // ── Data Store ───────────────────────────────────────────────
 // localStorage is a fallback ONLY for true offline — always prefer server data
 let db              = [];          // start empty, fill from server first
@@ -196,13 +201,16 @@ function initAllDateTimeInputs() {
 function syncExitDateTime() {
   const ed = document.getElementById('exitDateInput');
   const et = document.getElementById('exitTimeInput');
-  if (ed) ed.value = new Date().toISOString().split('T')[0];
-  if (et) et.value = liveTime24();
+  // Only auto-fill if user hasn't manually set them
+  if (ed && !exitDateManual) ed.value = new Date().toISOString().split('T')[0];
+  if (et && !exitTimeManual) et.value = liveTime24();
 }
 
-/** Track if user manually changed entry time/date */
+/** Track if user manually changed entry or exit time/date */
 let entryTimeManual = false;
 let entryDateManual = false;
+let exitTimeManual  = false;
+let exitDateManual  = false;
 
 /** Live auto-tick for entry time — stops once user manually edits */
 function startEntryTimeTick() {
@@ -215,8 +223,11 @@ function startEntryTimeTick() {
       const ed = document.getElementById('entryDateInput');
       if (ed) ed.value = new Date().toISOString().split('T')[0];
     }
-    // Keep exit date/time always current
-    syncExitDateTime();
+    // Exit date/time: only auto-fill if user hasn't manually edited them
+    const _xd = document.getElementById('exitDateInput');
+    const _xt = document.getElementById('exitTimeInput');
+    if (_xd && !exitDateManual) _xd.value = new Date().toISOString().split('T')[0];
+    if (_xt && !exitTimeManual) _xt.value = liveTime24();
   }, 10000); // refresh every 10s
 }
 
@@ -228,7 +239,11 @@ function goTab(tab, btn) {
   btn.classList.add('active');
   document.getElementById('appBody').scrollTop = 0;
   if (tab === 'exit') {
-    syncExitDateTime();
+    // Only auto-fill exit date/time when switching tabs if not manually set
+    const _xd = document.getElementById('exitDateInput');
+    const _xt = document.getElementById('exitTimeInput');
+    if (_xd && !exitDateManual) _xd.value = new Date().toISOString().split('T')[0];
+    if (_xt && !exitTimeManual) _xt.value = liveTime24();
     renderParked();
   }
   if (tab === 'records') renderRecords();
@@ -252,6 +267,7 @@ function formatDate(dateStr) {
     return d.toLocaleDateString('en-IN', { day: '2-digit', month: '2-digit', year: 'numeric' });
   } catch (e) { return dateStr; }
 }
+
 
 // ── ENTRY ────────────────────────────────────────────────────
 async function recordEntry() {
@@ -410,6 +426,8 @@ function clearExitForm() {
   document.getElementById('exitLorrySearch').value    = '';
   document.getElementById('exitError').style.display  = 'none';
   document.getElementById('lookupCard').style.display = 'none';
+  exitDateManual = false;
+  exitTimeManual = false;
   document.getElementById('exitDateInput').value = new Date().toISOString().split('T')[0];
   document.getElementById('exitTimeInput').value = liveTime24();
 }
@@ -966,8 +984,28 @@ document.addEventListener('DOMContentLoaded', async function () {
   if (_ed) _ed.value = today;
   if (_et) _et.value = now;
   syncExitDateTime();
-  if (_ed) _ed.addEventListener('change', () => { entryDateManual = true; });
-  if (_et) _et.addEventListener('change', () => { entryTimeManual = true; });
+  // Use 'focus' so manual flag is set the INSTANT user taps the field,
+  // preventing the 10s tick from overwriting their value mid-edit.
+  // 'input' catches programmatic changes and fast edits too.
+  if (_ed) {
+    _ed.addEventListener('focus', () => { entryDateManual = true; });
+    _ed.addEventListener('input', () => { entryDateManual = true; });
+  }
+  if (_et) {
+    _et.addEventListener('focus', () => { entryTimeManual = true; });
+    _et.addEventListener('input', () => { entryTimeManual = true; });
+  }
+  // Exit date/time — wire up manual flags once DOM is ready
+  const _xd = document.getElementById('exitDateInput');
+  const _xt = document.getElementById('exitTimeInput');
+  if (_xd) {
+    _xd.addEventListener('focus', () => { exitDateManual = true; });
+    _xd.addEventListener('input', () => { exitDateManual = true; });
+  }
+  if (_xt) {
+    _xt.addEventListener('focus', () => { exitTimeManual = true; });
+    _xt.addEventListener('input', () => { exitTimeManual = true; });
+  }
 
   startEntryTimeTick();
 

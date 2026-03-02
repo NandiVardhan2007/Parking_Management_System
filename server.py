@@ -17,11 +17,19 @@ from pathlib import Path
 
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
+import threading
+import json as _json
 
 # ── Config ───────────────────────────────────────────────────────
 PORT    = int(os.environ.get("PORT", 3000))
 DB_PATH = os.environ.get("DB_PATH", str(Path(__file__).parent / "kpr.db"))
 PUBLIC  = Path(__file__).parent / "public"
+
+# ── Google Sheets Backup URLs ────────────────────────────────────
+# Set these as environment variables, or paste URLs directly here.
+# Leave blank "" to disable.
+GSHEET_ENTRY_URL = os.environ.get("GSHEET_ENTRY_URL", "https://script.google.com/macros/s/AKfycbyRLrYvPPtPdav9TCD0730I_rBsUFRQLQ2J0ShYHXilFS3ZZpZ5z0XJeyLv0WYdi5V1/exec")
+GSHEET_EXIT_URL  = os.environ.get("GSHEET_EXIT_URL",  "https://script.google.com/macros/s/AKfycbysR29Y_p1txj_QFvilORhUFvU5Tf6oTqZXon5nwHsISTGuELgdGhF3ppOylzOIQ9gTKQ/exec")
 
 app = Flask(__name__, static_folder=None)
 CORS(app)
@@ -95,17 +103,122 @@ def init_db():
 
             INSERT OR IGNORE INTO settings(key, value) VALUES ('hourly_rate', '130');
         """)
-        # Migrate old databases: add new columns if they don't exist
-        for col, typ in [
-            ("entry_time",       "TEXT"),
-            ("exit_time",        "TEXT"),
-            ("duration_minutes", "INTEGER"),
+        # ── Detect existing columns ───────────────────────────────
+        existing_cols = {
+            row[1] for row in con.execute("PRAGMA table_info(records)").fetchall()
+        }
+
+        # ── Check for legacy schema (entry_iso, exit_iso, etc.)  ─
+        # Old databases used different column names with NOT NULL constraints
+        # that conflict with the current schema. If detected, we rebuild the
+        # table cleanly: rename → create new → copy matching columns → drop old.
+        LEGACY_MARKERS = {"entry_iso", "exit_iso", "entry_dt", "exit_dt"}
+        needs_rebuild  = bool(existing_cols & LEGACY_MARKERS)
+
+        if needs_rebuild:
+            print("[KPR] Legacy schema detected — migrating database to new schema…")
+            # Map old column names → new column names where they differ
+            COL_MAP = {
+                "entry_iso":  "entry_date",
+                "exit_iso":   "exit_date",
+                "entry_dt":   "entry_display",
+                "exit_dt":    "exit_display",
+            }
+            # Build SELECT list: pick up every useful column, remapping names
+            WANTED = [
+                "token", "lorry", "driver", "phone", "remarks",
+                "entry_date", "entry_time", "entry_display",
+                "exit_date",  "exit_time",  "exit_display",
+                "duration_minutes", "amount", "status", "created_at"
+            ]
+            select_parts = []
+            for col in WANTED:
+                # Find the source column in the old table
+                old_col = next((k for k, v in COL_MAP.items() if v == col), col)
+                if old_col in existing_cols:
+                    select_parts.append(f"{old_col} AS {col}")
+                elif col in existing_cols:
+                    select_parts.append(col)
+                else:
+                    # Provide safe defaults for missing columns
+                    defaults = {
+                        "entry_time": "NULL", "exit_date": "NULL",
+                        "exit_time":  "NULL", "exit_display": "'--'",
+                        "duration_minutes": "NULL", "amount": "NULL",
+                        "driver": "'--'", "phone": "'--'",
+                        "remarks": "'--'", "status": "'IN'",
+                        "created_at": "datetime('now')",
+                        "entry_display": "''",
+                    }
+                    select_parts.append(f"{defaults.get(col, 'NULL')} AS {col}")
+
+            con.execute("ALTER TABLE records RENAME TO records_legacy")
+            con.execute("""
+                CREATE TABLE records (
+                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                    token            INTEGER NOT NULL UNIQUE,
+                    lorry            TEXT    NOT NULL COLLATE NOCASE,
+                    driver           TEXT    NOT NULL DEFAULT '--',
+                    phone            TEXT    NOT NULL DEFAULT '--',
+                    remarks          TEXT    NOT NULL DEFAULT '--',
+                    entry_date       TEXT    NOT NULL DEFAULT '',
+                    entry_time       TEXT,
+                    entry_display    TEXT    NOT NULL DEFAULT '',
+                    exit_date        TEXT,
+                    exit_time        TEXT,
+                    exit_display     TEXT    DEFAULT '--',
+                    duration_minutes INTEGER,
+                    amount           REAL,
+                    status           TEXT    NOT NULL DEFAULT 'IN'
+                                             CHECK(status IN ('IN','OUT')),
+                    created_at       TEXT    NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+            con.execute(f"""
+                INSERT INTO records
+                    (token, lorry, driver, phone, remarks,
+                     entry_date, entry_time, entry_display,
+                     exit_date, exit_time, exit_display,
+                     duration_minutes, amount, status, created_at)
+                SELECT {', '.join(select_parts)}
+                FROM records_legacy
+            """)
+            con.execute("DROP TABLE records_legacy")
+            print("[KPR] Migration complete ✓")
+
+        else:
+            # ── Add any missing columns to an already-modern schema ──
+            MIGRATIONS = [
+                ("entry_time",       "TEXT"),
+                ("exit_time",        "TEXT"),
+                ("exit_date",        "TEXT"),
+                ("exit_display",     "TEXT    DEFAULT '--'"),
+                ("duration_minutes", "INTEGER"),
+                ("amount",           "REAL"),
+                ("driver",           "TEXT    NOT NULL DEFAULT '--'"),
+                ("phone",            "TEXT    NOT NULL DEFAULT '--'"),
+                ("remarks",          "TEXT    NOT NULL DEFAULT '--'"),
+            ]
+            for col, typedef in MIGRATIONS:
+                try:
+                    con.execute(f"ALTER TABLE records ADD COLUMN {col} {typedef}")
+                except Exception:
+                    pass  # already exists
+
+        # ── Recreate indexes (safe if already exist) ──────────────
+        for idx_sql in [
+            "CREATE INDEX IF NOT EXISTS idx_status ON records(status)",
+            "CREATE INDEX IF NOT EXISTS idx_lorry  ON records(lorry)",
+            "CREATE INDEX IF NOT EXISTS idx_token  ON records(token)",
+            "CREATE INDEX IF NOT EXISTS idx_entry  ON records(entry_date)",
+            "CREATE INDEX IF NOT EXISTS idx_exit   ON records(exit_date)",
         ]:
             try:
-                con.execute(f"ALTER TABLE records ADD COLUMN {col} {typ}")
+                con.execute(idx_sql)
             except Exception:
-                pass  # column already exists
-        # Migrate old daily_rate key → hourly_rate
+                pass
+
+        # ── Migrate old daily_rate key → hourly_rate ──────────────
         old = con.execute("SELECT value FROM settings WHERE key='daily_rate'").fetchone()
         if old:
             con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('hourly_rate',?)", (old["value"],))
@@ -178,6 +291,91 @@ def ok(data=None, **kwargs):
 
 def err(msg: str, status: int = 400):
     return jsonify({"ok": False, "error": msg}), status
+
+# ── Google Sheets Helper ─────────────────────────────────────────
+def _post_to_sheets(url: str, payload: dict):
+    """Fire-and-forget POST to a Google Apps Script Web App.
+    Runs in a daemon thread so it never blocks the API response.
+
+    ROOT CAUSE FIX: Google Apps Script web apps return a 302 redirect.
+    Python requests auto-follows redirects but converts POST→GET, which
+    means e.postData is None in Apps Script. We manually follow the
+    redirect as POST to preserve the body.
+    """
+    if not url or url.startswith("PASTE_"):
+        return
+    def _send():
+        try:
+            import requests as _req
+
+            # Send each field as an individual form parameter.
+            # Apps Script reads them via e.parameter[header] where
+            # header matches the column name in row 1 of the sheet.
+            # This is the exact same pattern used by portfolio contact forms.
+            r = _req.post(url, data=payload,
+                          timeout=15, allow_redirects=True)
+
+            if r.status_code == 200:
+                print(f"[GSheet] ✓ {payload.get('type','?')} "
+                      f"#{payload.get('token','?')} stored OK")
+            else:
+                print(f"[GSheet] ✗ HTTP {r.status_code} — {r.text[:200]}")
+        except Exception as e:
+            print(f"[GSheet] Failed: {e}")
+    threading.Thread(target=_send, daemon=True).start()
+
+def sheets_entry_payload(rec: dict, rate: float) -> dict:
+    """Build the entry payload from a record dict."""
+    def _to12h(t24):
+        if not t24: return ""
+        try:
+            h, m = map(int, t24.split(":"))
+            ampm = "PM" if h >= 12 else "AM"
+            h12  = h % 12 or 12
+            return f"{h12:02d}:{m:02d} {ampm}"
+        except Exception:
+            return t24
+    return {
+        "type":       "ENTRY",
+        "timestamp":  datetime.datetime.now().strftime("%d/%m/%Y, %I:%M:%S %p"),
+        "token":      rec["token"],
+        "lorry":      rec["lorry"],
+        "driver":     rec["driver"] if rec["driver"] != "--" else "",
+        "phone":      rec["phone"]  if rec["phone"]  != "--" else "",
+        "remarks":    rec["remarks"] if rec["remarks"] != "--" else "",
+        "entry_date": rec["entryDisplay"] or "",
+        "entry_time": _to12h(rec.get("entryTime") or ""),
+        "rate":       rate,
+    }
+
+def sheets_exit_payload(rec: dict, rate: float, billable_days: int) -> dict:
+    """Build the exit payload from a record dict."""
+    def _to12h(t24):
+        if not t24: return ""
+        try:
+            h, m = map(int, t24.split(":"))
+            ampm = "PM" if h >= 12 else "AM"
+            h12  = h % 12 or 12
+            return f"{h12:02d}:{m:02d} {ampm}"
+        except Exception:
+            return t24
+    days = billable_days or 1
+    return {
+        "type":       "EXIT",
+        "timestamp":  datetime.datetime.now().strftime("%d/%m/%Y, %I:%M:%S %p"),
+        "token":      rec["token"],
+        "lorry":      rec["lorry"],
+        "driver":     rec["driver"] if rec["driver"] != "--" else "",
+        "phone":      rec["phone"]  if rec["phone"]  != "--" else "",
+        "remarks":    rec["remarks"] if rec["remarks"] != "--" else "",
+        "entry_date": rec["entryDisplay"] or "",
+        "entry_time": _to12h(rec.get("entryTime") or ""),
+        "exit_date":  rec.get("exitDisplay") or "",
+        "exit_time":  _to12h(rec.get("exitTime") or ""),
+        "duration":   f"{days} Day{'s' if days != 1 else ''}",
+        "rate":       rate,
+        "amount":     rec.get("amount") or 0,
+    }
 
 # ── Static files ──────────────────────────────────────────────────
 if PUBLIC.exists():
@@ -304,7 +502,12 @@ def create_record():
         ))
         row = con.execute("SELECT * FROM records WHERE token=?", (token,)).fetchone()
 
-    return ok(row_to_dict(row), message=f"Entry recorded: Token #{token}")
+    rec = row_to_dict(row)
+    # Fire Google Sheets backup in background (non-blocking)
+    with db_conn() as _c:
+        _rate = get_rate(_c)
+    _post_to_sheets(GSHEET_ENTRY_URL, sheets_entry_payload(rec, _rate))
+    return ok(rec, message=f"Entry recorded: Token #{token}")
 
 
 @app.patch("/api/records/<int:rec_id>/exit")
@@ -334,8 +537,12 @@ def exit_record(rec_id: int):
 
         updated = con.execute("SELECT * FROM records WHERE id=?", (rec_id,)).fetchone()
 
-    return ok(row_to_dict(updated),
-              message=f"Exit processed: {dur['billable_days']} day(s), Rs.{amount}")
+    rec = row_to_dict(updated)
+    # Fire Google Sheets backup in background (non-blocking)
+    with db_conn() as _c:
+        _rate = get_rate(_c)
+    _post_to_sheets(GSHEET_EXIT_URL, sheets_exit_payload(rec, _rate, dur["billable_days"]))
+    return ok(rec, message=f"Exit processed: {dur['billable_days']} day(s), Rs.{amount}")
 
 
 @app.delete("/api/records/<int:rec_id>")

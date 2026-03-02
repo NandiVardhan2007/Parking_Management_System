@@ -281,9 +281,19 @@
           style="letter-spacing:1.5px">
         <div class="time-hint">Driver forgot serial no? Enter lorry number to find it</div>
       </div>
-      <!-- Exit date/time are always current — no manual input needed -->
-      <input type="hidden" id="exitDateInput">
-      <input type="hidden" id="exitTimeInput">
+      <!-- Exit Date -->
+      <div class="fg">
+        <label>Exit Date * 📅</label>
+        <input type="date" id="exitDateInput" class="inp-date">
+        <div class="time-hint">Auto-filled with today · tap to change</div>
+      </div>
+
+      <!-- Exit Time -->
+      <div class="fg">
+        <label>Exit Time * 🕐</label>
+        <input type="time" id="exitTimeInput" class="inp-time-full">
+        <div class="time-hint">Live time auto-fills · tap to set manually</div>
+      </div>
 
       <!-- Error box -->
       <div class="err-box" id="exitError"></div>

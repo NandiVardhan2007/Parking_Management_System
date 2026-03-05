@@ -1,275 +1,199 @@
 # ================================================================
 #  KPR TRANSPORT PARKING SYSTEM — Python Backend
-#  server.py  |  Flask + SQLite
+#  server.py  |  Flask + MongoDB Atlas
 #
 #  BILLING MODEL: DAY-WISE
 #  - entry_date / exit_date compared for calendar day difference
 #  - billable_days = (exit_date − entry_date).days  (minimum 1)
 #  - amount        = billable_days × daily_rate
+#
+#  SECURITY NOTES (fixes applied):
+#  - All secrets loaded from environment variables only (no hardcoding)
+#  - Admin panel and /api/admin/* routes removed entirely
+#  - Regex search input sanitized (re.escape) to prevent ReDoS
+#  - Pagination limit capped at MAX_PAGE_LIMIT
+#  - Input field lengths validated (lorry, driver, phone, remarks)
+#  - CORS restricted to ALLOWED_ORIGINS env var
+#  - PRINT_SECRET no longer has an insecure default
 # ================================================================
 
 import os
-import math
-import sqlite3
+import re
 import datetime
-from contextlib import contextmanager
+import threading
 from pathlib import Path
+
+# Load .env file automatically (ignored if not present, e.g. on Render/Railway
+# where env vars are injected directly by the platform)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent / ".env")
+except ImportError:
+    pass  # python-dotenv not installed — rely on shell env vars
 
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-import threading
-import json as _json
+from pymongo import MongoClient, DESCENDING, ASCENDING
+from bson import ObjectId
+
+
+# ── IST Timezone ─────────────────────────────────────────────────
+# Render servers run UTC. ALL date/time values stored and returned
+# by this API are explicitly in Indian Standard Time (UTC+05:30).
+IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
 
 # ── Config ───────────────────────────────────────────────────────
-PORT    = int(os.environ.get("PORT", 3000))
-DB_PATH = os.environ.get("DB_PATH", str(Path(__file__).parent / "kpr.db"))
+PORT      = int(os.environ.get("PORT", 3000))
+
+# SECURITY: All secrets MUST come from environment variables.
+# Never commit real credentials to source control.
+MONGO_URI = os.environ.get("MONGO_URI")
+if not MONGO_URI:
+    raise RuntimeError(
+        "MONGO_URI environment variable is not set. "
+        "Example: export MONGO_URI='mongodb+srv://user:pass@cluster/'"
+    )
+
+DB_NAME = os.environ.get("MONGO_DB", "kpr_parking")
 PUBLIC  = Path(__file__).parent / "public"
 
-# ── Google Sheets Backup URLs ────────────────────────────────────
-# Set these as environment variables, or paste URLs directly here.
-# Leave blank "" to disable.
-GSHEET_ENTRY_URL = os.environ.get("GSHEET_ENTRY_URL", "https://script.google.com/macros/s/AKfycbyRLrYvPPtPdav9TCD0730I_rBsUFRQLQ2J0ShYHXilFS3ZZpZ5z0XJeyLv0WYdi5V1/exec")
-GSHEET_EXIT_URL  = os.environ.get("GSHEET_EXIT_URL",  "https://script.google.com/macros/s/AKfycbysR29Y_p1txj_QFvilORhUFvU5Tf6oTqZXon5nwHsISTGuELgdGhF3ppOylzOIQ9gTKQ/exec")
+# SECURITY: PRINT_SECRET must be set in env; no insecure default.
+PRINT_SECRET = os.environ.get("PRINT_SECRET")
+if not PRINT_SECRET:
+    raise RuntimeError(
+        "PRINT_SECRET environment variable is not set. "
+        "Set a long random string, e.g.: export PRINT_SECRET='$(openssl rand -hex 32)'"
+    )
+
+# SECURITY: Google Sheets webhook URLs — optional, env-only.
+GSHEET_ENTRY_URL = os.environ.get("GSHEET_ENTRY_URL", "")
+GSHEET_EXIT_URL  = os.environ.get("GSHEET_EXIT_URL",  "")
+
+# SECURITY: Restrict CORS to known origins.
+# Set ALLOWED_ORIGINS="https://your-domain.com,https://other.com"
+_allowed_origins_raw = os.environ.get("ALLOWED_ORIGINS", "")
+ALLOWED_ORIGINS = (
+    [o.strip() for o in _allowed_origins_raw.split(",") if o.strip()]
+    if _allowed_origins_raw
+    else "*"   # falls back to wildcard only if explicitly unset (dev mode)
+)
+
+# Input validation limits
+MAX_LORRY_LEN   = 20
+MAX_NAME_LEN    = 80
+MAX_PHONE_LEN   = 20
+MAX_REMARKS_LEN = 200
+MAX_PAGE_LIMIT  = 500   # cap to prevent full-table dump via ?limit=999999
 
 app = Flask(__name__, static_folder=None)
-CORS(app)
+CORS(app, origins=ALLOWED_ORIGINS)
 
-# ── Database ──────────────────────────────────────────────────────
-def get_db() -> sqlite3.Connection:
-    con = sqlite3.connect(DB_PATH, check_same_thread=False)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA journal_mode = WAL")
-    con.execute("PRAGMA synchronous  = NORMAL")
-    con.execute("PRAGMA cache_size   = -32000")
-    con.execute("PRAGMA foreign_keys = ON")
-    return con
+# ── MongoDB Connection ────────────────────────────────────────────
+_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=10000)
+_db     = _client[DB_NAME]
 
-@contextmanager
-def db_conn():
-    con = get_db()
-    try:
-        yield con
-        con.commit()
-    except Exception:
-        con.rollback()
-        raise
-    finally:
-        con.close()
+records_col     = _db["records"]
+settings_col    = _db["settings"]
+print_queue_col = _db["print_queue"]
+counters_col    = _db["counters"]
 
 
 def init_db():
-    with db_conn() as con:
-        con.executescript("""
-            CREATE TABLE IF NOT EXISTS records (
-                id               INTEGER PRIMARY KEY AUTOINCREMENT,
-                token            INTEGER NOT NULL UNIQUE,
-                lorry            TEXT    NOT NULL COLLATE NOCASE,
-                driver           TEXT    NOT NULL DEFAULT '--',
-                phone            TEXT    NOT NULL DEFAULT '--',
-                remarks          TEXT    NOT NULL DEFAULT '--',
-                entry_date       TEXT    NOT NULL,
-                entry_time       TEXT,
-                entry_display    TEXT    NOT NULL,
-                exit_date        TEXT,
-                exit_time        TEXT,
-                exit_display     TEXT    DEFAULT '--',
-                duration_minutes INTEGER,
-                amount           REAL,
-                status           TEXT    NOT NULL DEFAULT 'IN'
-                                         CHECK(status IN ('IN','OUT')),
-                created_at       TEXT    NOT NULL DEFAULT (datetime('now'))
-            );
+    """Create indexes and seed default settings."""
+    records_col.create_index("token",      unique=True)
+    records_col.create_index("status")
+    records_col.create_index("lorry")
+    records_col.create_index("entry_date")
+    records_col.create_index("exit_date")
 
-            CREATE TABLE IF NOT EXISTS settings (
-                key   TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
+    print_queue_col.create_index("status")
+    print_queue_col.create_index("seq_id")
 
-            CREATE TABLE IF NOT EXISTS print_queue (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                job_data    TEXT    NOT NULL,
-                status      TEXT    NOT NULL DEFAULT 'pending'
-                                    CHECK(status IN ('pending','done','failed')),
-                created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
-                ack_at      TEXT
-            );
+    settings_col.update_one(
+        {"key": "hourly_rate"},
+        {"$setOnInsert": {"key": "hourly_rate", "value": "130"}},
+        upsert=True
+    )
+    counters_col.update_one(
+        {"_id": "token"},
+        {"$setOnInsert": {"seq": 0}},
+        upsert=True
+    )
+    counters_col.update_one(
+        {"_id": "print_queue"},
+        {"$setOnInsert": {"seq": 0}},
+        upsert=True
+    )
+    print(f"[KPR] MongoDB connected → {DB_NAME}")
 
-            CREATE INDEX IF NOT EXISTS idx_status    ON records(status);
-            CREATE INDEX IF NOT EXISTS idx_lorry     ON records(lorry);
-            CREATE INDEX IF NOT EXISTS idx_token     ON records(token);
-            CREATE INDEX IF NOT EXISTS idx_entry     ON records(entry_date);
-            CREATE INDEX IF NOT EXISTS idx_exit      ON records(exit_date);
-            CREATE INDEX IF NOT EXISTS idx_pq_status ON print_queue(status);
-
-            INSERT OR IGNORE INTO settings(key, value) VALUES ('hourly_rate', '130');
-        """)
-        # ── Detect existing columns ───────────────────────────────
-        existing_cols = {
-            row[1] for row in con.execute("PRAGMA table_info(records)").fetchall()
-        }
-
-        # ── Check for legacy schema (entry_iso, exit_iso, etc.)  ─
-        # Old databases used different column names with NOT NULL constraints
-        # that conflict with the current schema. If detected, we rebuild the
-        # table cleanly: rename → create new → copy matching columns → drop old.
-        LEGACY_MARKERS = {"entry_iso", "exit_iso", "entry_dt", "exit_dt"}
-        needs_rebuild  = bool(existing_cols & LEGACY_MARKERS)
-
-        if needs_rebuild:
-            print("[KPR] Legacy schema detected — migrating database to new schema…")
-            # Map old column names → new column names where they differ
-            COL_MAP = {
-                "entry_iso":  "entry_date",
-                "exit_iso":   "exit_date",
-                "entry_dt":   "entry_display",
-                "exit_dt":    "exit_display",
-            }
-            # Build SELECT list: pick up every useful column, remapping names
-            WANTED = [
-                "token", "lorry", "driver", "phone", "remarks",
-                "entry_date", "entry_time", "entry_display",
-                "exit_date",  "exit_time",  "exit_display",
-                "duration_minutes", "amount", "status", "created_at"
-            ]
-            select_parts = []
-            for col in WANTED:
-                # Find the source column in the old table
-                old_col = next((k for k, v in COL_MAP.items() if v == col), col)
-                if old_col in existing_cols:
-                    select_parts.append(f"{old_col} AS {col}")
-                elif col in existing_cols:
-                    select_parts.append(col)
-                else:
-                    # Provide safe defaults for missing columns
-                    defaults = {
-                        "entry_time": "NULL", "exit_date": "NULL",
-                        "exit_time":  "NULL", "exit_display": "'--'",
-                        "duration_minutes": "NULL", "amount": "NULL",
-                        "driver": "'--'", "phone": "'--'",
-                        "remarks": "'--'", "status": "'IN'",
-                        "created_at": "datetime('now')",
-                        "entry_display": "''",
-                    }
-                    select_parts.append(f"{defaults.get(col, 'NULL')} AS {col}")
-
-            con.execute("ALTER TABLE records RENAME TO records_legacy")
-            con.execute("""
-                CREATE TABLE records (
-                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-                    token            INTEGER NOT NULL UNIQUE,
-                    lorry            TEXT    NOT NULL COLLATE NOCASE,
-                    driver           TEXT    NOT NULL DEFAULT '--',
-                    phone            TEXT    NOT NULL DEFAULT '--',
-                    remarks          TEXT    NOT NULL DEFAULT '--',
-                    entry_date       TEXT    NOT NULL DEFAULT '',
-                    entry_time       TEXT,
-                    entry_display    TEXT    NOT NULL DEFAULT '',
-                    exit_date        TEXT,
-                    exit_time        TEXT,
-                    exit_display     TEXT    DEFAULT '--',
-                    duration_minutes INTEGER,
-                    amount           REAL,
-                    status           TEXT    NOT NULL DEFAULT 'IN'
-                                             CHECK(status IN ('IN','OUT')),
-                    created_at       TEXT    NOT NULL DEFAULT (datetime('now'))
-                )
-            """)
-            con.execute(f"""
-                INSERT INTO records
-                    (token, lorry, driver, phone, remarks,
-                     entry_date, entry_time, entry_display,
-                     exit_date, exit_time, exit_display,
-                     duration_minutes, amount, status, created_at)
-                SELECT {', '.join(select_parts)}
-                FROM records_legacy
-            """)
-            con.execute("DROP TABLE records_legacy")
-            print("[KPR] Migration complete ✓")
-
-        else:
-            # ── Add any missing columns to an already-modern schema ──
-            MIGRATIONS = [
-                ("entry_time",       "TEXT"),
-                ("exit_time",        "TEXT"),
-                ("exit_date",        "TEXT"),
-                ("exit_display",     "TEXT    DEFAULT '--'"),
-                ("duration_minutes", "INTEGER"),
-                ("amount",           "REAL"),
-                ("driver",           "TEXT    NOT NULL DEFAULT '--'"),
-                ("phone",            "TEXT    NOT NULL DEFAULT '--'"),
-                ("remarks",          "TEXT    NOT NULL DEFAULT '--'"),
-            ]
-            for col, typedef in MIGRATIONS:
-                try:
-                    con.execute(f"ALTER TABLE records ADD COLUMN {col} {typedef}")
-                except Exception:
-                    pass  # already exists
-
-        # ── Recreate indexes (safe if already exist) ──────────────
-        for idx_sql in [
-            "CREATE INDEX IF NOT EXISTS idx_status ON records(status)",
-            "CREATE INDEX IF NOT EXISTS idx_lorry  ON records(lorry)",
-            "CREATE INDEX IF NOT EXISTS idx_token  ON records(token)",
-            "CREATE INDEX IF NOT EXISTS idx_entry  ON records(entry_date)",
-            "CREATE INDEX IF NOT EXISTS idx_exit   ON records(exit_date)",
-        ]:
-            try:
-                con.execute(idx_sql)
-            except Exception:
-                pass
-
-        # ── Migrate old daily_rate key → hourly_rate ──────────────
-        old = con.execute("SELECT value FROM settings WHERE key='daily_rate'").fetchone()
-        if old:
-            con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('hourly_rate',?)", (old["value"],))
 
 init_db()
 
 # ── Helpers ───────────────────────────────────────────────────────
-def row_to_dict(row) -> dict | None:
-    if row is None:
+def next_token() -> int:
+    result = counters_col.find_one_and_update(
+        {"_id": "token"},
+        {"$inc": {"seq": 1}},
+        return_document=True,
+        upsert=True
+    )
+    return result["seq"]
+
+
+def next_seq(counter_id: str) -> int:
+    result = counters_col.find_one_and_update(
+        {"_id": counter_id},
+        {"$inc": {"seq": 1}},
+        return_document=True,
+        upsert=True
+    )
+    return result["seq"]
+
+
+def rec_to_dict(doc) -> dict | None:
+    if doc is None:
         return None
-    r = dict(row)
     return {
-        "id":              r["id"],
-        "token":           r["token"],
-        "lorry":           r["lorry"],
-        "driver":          r["driver"],
-        "phone":           r["phone"],
-        "remarks":         r["remarks"],
-        "entryDate":       r["entry_date"],
-        "entryTime":       r.get("entry_time"),
-        "entryDisplay":    r["entry_display"],
-        "exitDate":        r.get("exit_date"),
-        "exitTime":        r.get("exit_time"),
-        "exitDisplay":     r.get("exit_display") or "--",
-        "durationMin":     r.get("duration_minutes"),
-        "amount":          r["amount"],
-        "status":          r["status"],
-        "createdAt":       r["created_at"],
+        "id":           str(doc["_id"]),
+        "token":        doc.get("token"),
+        "lorry":        doc.get("lorry"),
+        "driver":       doc.get("driver", "--"),
+        "phone":        doc.get("phone",  "--"),
+        "remarks":      doc.get("remarks", "--"),
+        "entryDate":    doc.get("entry_date"),
+        "entryTime":    doc.get("entry_time"),
+        "entryDisplay": doc.get("entry_display"),
+        "exitDate":     doc.get("exit_date"),
+        "exitTime":     doc.get("exit_time"),
+        "exitDisplay":  doc.get("exit_display") or "--",
+        "durationMin":  doc.get("duration_minutes"),
+        "amount":       doc.get("amount"),
+        "status":       doc.get("status", "IN"),
+        "createdAt":    doc.get("created_at"),
     }
 
-def get_rate(con: sqlite3.Connection) -> float:
-    row = con.execute("SELECT value FROM settings WHERE key='hourly_rate'").fetchone()
-    return float(row["value"]) if row else 130.0
 
-def calc_duration(entry_date: str, entry_time: str | None,
-                  exit_date:  str, exit_time:  str | None) -> dict:
-    """
-    Day-wise billing.
-    Returns { duration_minutes (days×1440), billable_days }
-    Minimum: 1 day.
-    """
+def get_rate() -> float:
+    doc = settings_col.find_one({"key": "hourly_rate"})
+    return float(doc["value"]) if doc else 130.0
+
+
+def calc_duration(entry_date: str, entry_time,
+                  exit_date: str, exit_time) -> dict:
+    """Day-wise billing. Minimum 1 day."""
     try:
-        ed = datetime.date.fromisoformat(entry_date[:10])
-        xd = datetime.date.fromisoformat(exit_date[:10])
+        ed   = datetime.date.fromisoformat(entry_date[:10])
+        xd   = datetime.date.fromisoformat(exit_date[:10])
         days = max(1, (xd - ed).days)
     except Exception:
         days = 1
     return {"duration_minutes": days * 1440, "billable_days": days}
 
+
 def today_date() -> str:
-    return datetime.date.today().strftime("%Y-%m-%d")
+    """Today's date in IST — safe on UTC servers (Render)."""
+    return datetime.datetime.now(IST).strftime("%Y-%m-%d")
+
 
 def fmt_display(date_str: str) -> str:
     try:
@@ -278,9 +202,11 @@ def fmt_display(date_str: str) -> str:
     except Exception:
         return date_str
 
-def next_token(con: sqlite3.Connection) -> int:
-    row = con.execute("SELECT COALESCE(MAX(token), 0) + 1 AS nxt FROM records").fetchone()
-    return row["nxt"]
+
+def now_iso() -> str:
+    """Current IST timestamp as ISO 8601 string (no tz suffix, IST implied)."""
+    return datetime.datetime.now(IST).strftime("%Y-%m-%dT%H:%M:%S")
+
 
 def ok(data=None, **kwargs):
     payload = {"ok": True}
@@ -289,55 +215,52 @@ def ok(data=None, **kwargs):
     payload.update(kwargs)
     return jsonify(payload)
 
+
 def err(msg: str, status: int = 400):
     return jsonify({"ok": False, "error": msg}), status
 
+
+def safe_str(value, max_len: int, default: str = "--") -> str:
+    """Strip, truncate to max_len, fall back to default."""
+    s = (value or "").strip()[:max_len]
+    return s if s else default
+
+
 # ── Google Sheets Helper ─────────────────────────────────────────
 def _post_to_sheets(url: str, payload: dict):
-    """Fire-and-forget POST to a Google Apps Script Web App.
-    Runs in a daemon thread so it never blocks the API response.
-
-    ROOT CAUSE FIX: Google Apps Script web apps return a 302 redirect.
-    Python requests auto-follows redirects but converts POST→GET, which
-    means e.postData is None in Apps Script. We manually follow the
-    redirect as POST to preserve the body.
-    """
     if not url or url.startswith("PASTE_"):
         return
+
     def _send():
         try:
             import requests as _req
-
-            # Send each field as an individual form parameter.
-            # Apps Script reads them via e.parameter[header] where
-            # header matches the column name in row 1 of the sheet.
-            # This is the exact same pattern used by portfolio contact forms.
-            r = _req.post(url, data=payload,
-                          timeout=15, allow_redirects=True)
-
+            r = _req.post(url, data=payload, timeout=15, allow_redirects=True)
             if r.status_code == 200:
-                print(f"[GSheet] ✓ {payload.get('type','?')} "
-                      f"#{payload.get('token','?')} stored OK")
+                print(f"[GSheet] ✓ {payload.get('type','?')} #{payload.get('token','?')} stored OK")
             else:
                 print(f"[GSheet] ✗ HTTP {r.status_code} — {r.text[:200]}")
         except Exception as e:
             print(f"[GSheet] Failed: {e}")
+
     threading.Thread(target=_send, daemon=True).start()
 
+
+def _to12h(t24):
+    if not t24:
+        return ""
+    try:
+        h, m = map(int, t24.split(":"))
+        ampm = "PM" if h >= 12 else "AM"
+        h12  = h % 12 or 12
+        return f"{h12:02d}:{m:02d} {ampm}"
+    except Exception:
+        return t24
+
+
 def sheets_entry_payload(rec: dict, rate: float) -> dict:
-    """Build the entry payload from a record dict."""
-    def _to12h(t24):
-        if not t24: return ""
-        try:
-            h, m = map(int, t24.split(":"))
-            ampm = "PM" if h >= 12 else "AM"
-            h12  = h % 12 or 12
-            return f"{h12:02d}:{m:02d} {ampm}"
-        except Exception:
-            return t24
     return {
         "type":       "ENTRY",
-        "timestamp":  datetime.datetime.now().strftime("%d/%m/%Y, %I:%M:%S %p"),
+        "timestamp":  datetime.datetime.now(IST).strftime("%d/%m/%Y, %I:%M:%S %p"),
         "token":      rec["token"],
         "lorry":      rec["lorry"],
         "driver":     rec["driver"] if rec["driver"] != "--" else "",
@@ -348,21 +271,12 @@ def sheets_entry_payload(rec: dict, rate: float) -> dict:
         "rate":       rate,
     }
 
+
 def sheets_exit_payload(rec: dict, rate: float, billable_days: int) -> dict:
-    """Build the exit payload from a record dict."""
-    def _to12h(t24):
-        if not t24: return ""
-        try:
-            h, m = map(int, t24.split(":"))
-            ampm = "PM" if h >= 12 else "AM"
-            h12  = h % 12 or 12
-            return f"{h12:02d}:{m:02d} {ampm}"
-        except Exception:
-            return t24
     days = billable_days or 1
     return {
         "type":       "EXIT",
-        "timestamp":  datetime.datetime.now().strftime("%d/%m/%Y, %I:%M:%S %p"),
+        "timestamp":  datetime.datetime.now(IST).strftime("%d/%m/%Y, %I:%M:%S %p"),
         "token":      rec["token"],
         "lorry":      rec["lorry"],
         "driver":     rec["driver"] if rec["driver"] != "--" else "",
@@ -377,51 +291,80 @@ def sheets_exit_payload(rec: dict, rate: float, billable_days: int) -> dict:
         "amount":     rec.get("amount") or 0,
     }
 
+
 # ── Static files ──────────────────────────────────────────────────
 if PUBLIC.exists():
     @app.route("/", defaults={"path": ""})
     @app.route("/<path:path>")
     def serve_static(path):
+        # SECURITY: Block serving admin.html
+        if path and path.lower().startswith("admin"):
+            return jsonify({"ok": False, "error": "Not found"}), 404
         if path and (PUBLIC / path).exists():
             return send_from_directory(str(PUBLIC), path)
         return send_from_directory(str(PUBLIC), "index.html")
 
-# ── Routes ───────────────────────────────────────────────────────
+
+# ── Auth helper ───────────────────────────────────────────────────
+def _check_print_auth():
+    return request.headers.get("X-Print-Token", "") == PRINT_SECRET
+
+
+# ================================================================
+#  API ROUTES
+# ================================================================
 
 @app.get("/api/health")
 def health():
-    return ok(db=DB_PATH, timestamp=datetime.datetime.utcnow().isoformat())
+    return ok(db=DB_NAME, timestamp=datetime.datetime.now(IST).isoformat(), timezone="IST")
 
 
 @app.get("/api/stats")
 def stats():
     today = today_date()
-    with db_conn() as con:
-        row = con.execute("""
-            SELECT
-                SUM(CASE WHEN status='IN'  THEN 1 ELSE 0 END)                                AS parked,
-                SUM(CASE WHEN entry_date=? THEN 1 ELSE 0 END)                                AS today_entries,
-                SUM(CASE WHEN status='OUT' AND exit_date=? THEN 1 ELSE 0 END)                AS today_exits,
-                SUM(CASE WHEN status='OUT' AND exit_date=? THEN amount ELSE 0 END)           AS today_revenue,
-                COUNT(*)                                                                      AS total,
-                SUM(CASE WHEN status='OUT' THEN 1 ELSE 0 END)                                AS exited,
-                SUM(CASE WHEN status='OUT' THEN amount ELSE 0 END)                           AS total_revenue
-            FROM records
-        """, (today, today, today)).fetchone()
-    return ok(dict(row))
+
+    pipeline = [
+        {"$group": {
+            "_id": None,
+            "parked":        {"$sum": {"$cond": [{"$eq": ["$status", "IN"]},  1, 0]}},
+            "today_entries": {"$sum": {"$cond": [{"$eq": ["$entry_date", today]}, 1, 0]}},
+            "today_exits":   {"$sum": {"$cond": [
+                {"$and": [{"$eq": ["$status", "OUT"]}, {"$eq": ["$exit_date", today]}]}, 1, 0
+            ]}},
+            "today_revenue": {"$sum": {"$cond": [
+                {"$and": [{"$eq": ["$status", "OUT"]}, {"$eq": ["$exit_date", today]}]},
+                {"$ifNull": ["$amount", 0]}, 0
+            ]}},
+            "total":         {"$sum": 1},
+            "exited":        {"$sum": {"$cond": [{"$eq": ["$status", "OUT"]}, 1, 0]}},
+            "total_revenue": {"$sum": {"$cond": [
+                {"$eq": ["$status", "OUT"]}, {"$ifNull": ["$amount", 0]}, 0
+            ]}},
+        }}
+    ]
+
+    result = list(records_col.aggregate(pipeline))
+    if result:
+        r = result[0]
+        r.pop("_id", None)
+    else:
+        r = {
+            "parked": 0, "today_entries": 0, "today_exits": 0,
+            "today_revenue": 0, "total": 0, "exited": 0, "total_revenue": 0
+        }
+
+    return ok(r)
 
 
 @app.get("/api/settings")
 def get_settings():
-    with db_conn() as con:
-        rows = con.execute("SELECT key, value FROM settings").fetchall()
-    return ok({r["key"]: r["value"] for r in rows})
+    docs = settings_col.find({})
+    return ok({d["key"]: d["value"] for d in docs})
 
 
 @app.post("/api/settings")
 def post_settings():
-    body = request.get_json(silent=True) or {}
-    # Accept either key name for compatibility
+    body     = request.get_json(silent=True) or {}
     rate_val = body.get("hourly_rate") or body.get("daily_rate")
     if rate_val is None:
         return err("hourly_rate required")
@@ -431,8 +374,12 @@ def post_settings():
             raise ValueError
     except (TypeError, ValueError):
         return err("Invalid rate")
-    with db_conn() as con:
-        con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('hourly_rate',?)", (str(rate),))
+
+    settings_col.update_one(
+        {"key": "hourly_rate"},
+        {"$set": {"value": str(rate)}},
+        upsert=True
+    )
     return ok({"hourly_rate": rate})
 
 
@@ -440,118 +387,162 @@ def post_settings():
 def get_records():
     q      = request.args.get("q", "").strip()
     status = request.args.get("status", "").strip().upper()
-    page   = int(request.args.get("page",  "1"))
-    limit  = int(request.args.get("limit", "200"))
-    offset = (page - 1) * limit
 
-    with db_conn() as con:
-        sql    = "SELECT * FROM records WHERE 1=1"
-        params = []
-        if status in ("IN", "OUT"):
-            sql += " AND status = ?"
-            params.append(status)
-        if q:
-            sql += " AND (lorry LIKE ? OR driver LIKE ? OR CAST(token AS TEXT) LIKE ?)"
-            qp   = f"%{q}%"
-            params.extend([qp, qp, qp])
-        sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
-        rows = con.execute(sql, params).fetchall()
+    try:
+        page  = max(1, int(request.args.get("page",  "1")))
+        limit = min(MAX_PAGE_LIMIT, max(1, int(request.args.get("limit", "200"))))
+    except (ValueError, TypeError):
+        return err("page and limit must be integers")
 
-    return ok([row_to_dict(r) for r in rows])
+    skip = (page - 1) * limit
+
+    filt = {}
+    if status in ("IN", "OUT"):
+        filt["status"] = status
+
+    if q:
+        # SECURITY: re.escape prevents ReDoS via crafted regex input
+        safe_q = re.escape(q)
+        or_clauses = [
+            {"lorry":  {"$regex": safe_q, "$options": "i"}},
+            {"driver": {"$regex": safe_q, "$options": "i"}},
+        ]
+        if q.isdigit():
+            or_clauses.append({"token": int(q)})
+        filt["$or"] = or_clauses
+
+    docs = list(
+        records_col.find(filt)
+                   .sort("_id", DESCENDING)
+                   .skip(skip)
+                   .limit(limit)
+    )
+    return ok([rec_to_dict(d) for d in docs])
 
 
-@app.get("/api/records/<int:rec_id>")
-def get_record(rec_id: int):
-    with db_conn() as con:
-        row = con.execute("SELECT * FROM records WHERE id=?", (rec_id,)).fetchone()
-    if not row:
+@app.get("/api/records/<rec_id>")
+def get_record(rec_id: str):
+    try:
+        oid = ObjectId(rec_id)
+    except Exception:
+        return err("Invalid ID", 400)
+    doc = records_col.find_one({"_id": oid})
+    if not doc:
         return err("Record not found", 404)
-    return ok(row_to_dict(row))
+    return ok(rec_to_dict(doc))
 
 
 @app.post("/api/records")
 def create_record():
-    body       = request.get_json(silent=True) or {}
-    lorry      = (body.get("lorry") or "").strip().upper()
+    body  = request.get_json(silent=True) or {}
+    lorry = (body.get("lorry") or "").strip().upper()[:MAX_LORRY_LEN]
     if not lorry:
         return err("Lorry number required")
 
     entry_date = (body.get("entryDate") or today_date())[:10]
-    entry_time = (body.get("entryTime") or "")[:5] or None  # "HH:MM" or None
+    entry_time = (body.get("entryTime") or "")[:5] or None
 
-    with db_conn() as con:
-        dup = con.execute(
-            "SELECT token FROM records WHERE lorry=? AND status='IN'", (lorry,)
-        ).fetchone()
-        if dup:
-            return err(f"{lorry} is already parked with token #{dup['token']}", 409)
+    # Validate date format
+    try:
+        datetime.date.fromisoformat(entry_date)
+    except ValueError:
+        return err("Invalid entryDate format (expected YYYY-MM-DD)")
 
-        token = next_token(con)
-        con.execute("""
-            INSERT INTO records
-                (token, lorry, driver, phone, remarks,
-                 entry_date, entry_time, entry_display, status)
-            VALUES (?,?,?,?,?, ?,?,?, 'IN')
-        """, (
-            token, lorry,
-            (body.get("driver")  or "--").strip() or "--",
-            (body.get("phone")   or "--").strip() or "--",
-            (body.get("remarks") or "--").strip() or "--",
-            entry_date, entry_time, fmt_display(entry_date)
-        ))
-        row = con.execute("SELECT * FROM records WHERE token=?", (token,)).fetchone()
+    # Check for duplicate active entry
+    dup = records_col.find_one({"lorry": lorry, "status": "IN"})
+    if dup:
+        return err(f"{lorry} is already parked with token #{dup['token']}", 409)
 
-    rec = row_to_dict(row)
-    # Fire Google Sheets backup in background (non-blocking)
-    with db_conn() as _c:
-        _rate = get_rate(_c)
-    _post_to_sheets(GSHEET_ENTRY_URL, sheets_entry_payload(rec, _rate))
+    token = next_token()
+    doc = {
+        "token":            token,
+        "lorry":            lorry,
+        "driver":           safe_str(body.get("driver"),  MAX_NAME_LEN),
+        "phone":            safe_str(body.get("phone"),   MAX_PHONE_LEN),
+        "remarks":          safe_str(body.get("remarks"), MAX_REMARKS_LEN),
+        "entry_date":       entry_date,
+        "entry_time":       entry_time,
+        "entry_display":    fmt_display(entry_date),
+        "exit_date":        None,
+        "exit_time":        None,
+        "exit_display":     "--",
+        "duration_minutes": None,
+        "amount":           None,
+        "status":           "IN",
+        "created_at":       now_iso(),
+    }
+
+    result = records_col.insert_one(doc)
+    doc["_id"] = result.inserted_id
+    rec = rec_to_dict(doc)
+
+    _post_to_sheets(GSHEET_ENTRY_URL, sheets_entry_payload(rec, get_rate()))
     return ok(rec, message=f"Entry recorded: Token #{token}")
 
 
-@app.patch("/api/records/<int:rec_id>/exit")
-def exit_record(rec_id: int):
+@app.patch("/api/records/<rec_id>/exit")
+def exit_record(rec_id: str):
+    try:
+        oid = ObjectId(rec_id)
+    except Exception:
+        return err("Invalid ID", 400)
+
     body      = request.get_json(silent=True) or {}
     exit_date = (body.get("exitDate") or today_date())[:10]
-    exit_time = (body.get("exitTime") or "")[:5] or None  # "HH:MM" or None
+    exit_time = (body.get("exitTime") or "")[:5] or None
 
-    with db_conn() as con:
-        row = con.execute("SELECT * FROM records WHERE id=?", (rec_id,)).fetchone()
-        if not row:
-            return err("Record not found", 404)
-        if row["status"] == "OUT":
-            return err("Vehicle already exited", 400)
+    # Validate date format
+    try:
+        datetime.date.fromisoformat(exit_date)
+    except ValueError:
+        return err("Invalid exitDate format (expected YYYY-MM-DD)")
 
-        dur    = calc_duration(row["entry_date"], row["entry_time"], exit_date, exit_time)
-        rate   = get_rate(con)
-        amount = dur["billable_days"] * rate
+    doc = records_col.find_one({"_id": oid})
+    if not doc:
+        return err("Record not found", 404)
+    if doc["status"] == "OUT":
+        return err("Vehicle already exited", 400)
 
-        con.execute("""
-            UPDATE records
-            SET exit_date=?, exit_time=?, exit_display=?,
-                duration_minutes=?, amount=?, status='OUT'
-            WHERE id=?
-        """, (exit_date, exit_time, fmt_display(exit_date),
-              dur["duration_minutes"], amount, rec_id))
+    # Validate exit not before entry
+    try:
+        ed = datetime.date.fromisoformat(doc["entry_date"])
+        xd = datetime.date.fromisoformat(exit_date)
+        if xd < ed:
+            return err("exitDate cannot be before entryDate", 400)
+    except Exception:
+        pass  # calc_duration will handle gracefully
 
-        updated = con.execute("SELECT * FROM records WHERE id=?", (rec_id,)).fetchone()
+    dur    = calc_duration(doc["entry_date"], doc.get("entry_time"), exit_date, exit_time)
+    rate   = get_rate()
+    amount = dur["billable_days"] * rate
 
-    rec = row_to_dict(updated)
-    # Fire Google Sheets backup in background (non-blocking)
-    with db_conn() as _c:
-        _rate = get_rate(_c)
-    _post_to_sheets(GSHEET_EXIT_URL, sheets_exit_payload(rec, _rate, dur["billable_days"]))
+    records_col.update_one(
+        {"_id": oid},
+        {"$set": {
+            "exit_date":        exit_date,
+            "exit_time":        exit_time,
+            "exit_display":     fmt_display(exit_date),
+            "duration_minutes": dur["duration_minutes"],
+            "amount":           amount,
+            "status":           "OUT",
+        }}
+    )
+    updated = records_col.find_one({"_id": oid})
+    rec = rec_to_dict(updated)
+
+    _post_to_sheets(GSHEET_EXIT_URL, sheets_exit_payload(rec, rate, dur["billable_days"]))
     return ok(rec, message=f"Exit processed: {dur['billable_days']} day(s), Rs.{amount}")
 
 
-@app.delete("/api/records/<int:rec_id>")
-def delete_record(rec_id: int):
-    with db_conn() as con:
-        row = con.execute("SELECT id FROM records WHERE id=?", (rec_id,)).fetchone()
-        if not row:
-            return err("Record not found", 404)
-        con.execute("DELETE FROM records WHERE id=?", (rec_id,))
+@app.delete("/api/records/<rec_id>")
+def delete_record(rec_id: str):
+    try:
+        oid = ObjectId(rec_id)
+    except Exception:
+        return err("Invalid ID", 400)
+    result = records_col.delete_one({"_id": oid})
+    if result.deleted_count == 0:
+        return err("Record not found", 404)
     return ok(message=f"Record {rec_id} deleted")
 
 
@@ -560,8 +551,8 @@ def delete_all_records():
     body = request.get_json(silent=True) or {}
     if body.get("confirm") != "DELETE_ALL":
         return err("Confirmation required")
-    with db_conn() as con:
-        con.execute("DELETE FROM records")
+    records_col.delete_many({})
+    counters_col.update_one({"_id": "token"}, {"$set": {"seq": 0}})
     return ok(message="All records deleted")
 
 
@@ -574,57 +565,56 @@ def import_records():
 
     added  = 0
     errors = []
+    rate   = get_rate()
 
-    with db_conn() as con:
-        rate = get_rate(con)
+    for i, r in enumerate(records):
+        try:
+            lorry = (r.get("lorry") or "").strip().upper()[:MAX_LORRY_LEN]
+            if not lorry:
+                raise ValueError("Missing lorry")
 
-        for i, r in enumerate(records):
-            try:
-                lorry = (r.get("lorry") or "").strip().upper()
-                if not lorry:
-                    raise ValueError("Missing lorry")
+            entry_date = (r.get("entryDate") or today_date())[:10]
+            entry_time = (r.get("entryTime") or "")[:5] or None
+            exit_date  = (r.get("exitDate")  or "")[:10] or None
+            exit_time  = (r.get("exitTime")  or "")[:5]  or None
+            status     = "OUT" if exit_date else "IN"
 
-                entry_date = (r.get("entryDate") or today_date())[:10]
-                entry_time = (r.get("entryTime") or "")[:5] or None
-                exit_date  = (r.get("exitDate") or "")[:10] or None
-                exit_time  = (r.get("exitTime") or "")[:5]  or None
-                status     = "OUT" if exit_date else "IN"
+            # Validate dates
+            datetime.date.fromisoformat(entry_date)
+            if exit_date:
+                datetime.date.fromisoformat(exit_date)
 
-                dur    = calc_duration(entry_date, entry_time, exit_date, exit_time) if exit_date else None
-                amount = (dur["billable_days"] * rate) if dur else None
+            dur    = calc_duration(entry_date, entry_time, exit_date, exit_time) if exit_date else None
+            amount = (dur["billable_days"] * rate) if dur else None
 
-                token = int(r["token"]) if r.get("token") else None
-                if token:
-                    conflict = con.execute(
-                        "SELECT id FROM records WHERE token=?", (token,)
-                    ).fetchone()
-                    if conflict:
-                        token = None
-                if not token:
-                    token = next_token(con)
+            token = int(r["token"]) if r.get("token") else None
+            if token and records_col.find_one({"token": token}):
+                token = None
+            if not token:
+                token = next_token()
 
-                con.execute("""
-                    INSERT INTO records
-                        (token, lorry, driver, phone, remarks,
-                         entry_date, entry_time, entry_display,
-                         exit_date,  exit_time,  exit_display,
-                         duration_minutes, amount, status)
-                    VALUES (?,?,?,?,?, ?,?,?, ?,?,?, ?,?,?)
-                """, (
-                    token, lorry,
-                    (r.get("driver")  or "--").strip() or "--",
-                    (r.get("phone")   or "--").strip() or "--",
-                    (r.get("remarks") or "--").strip() or "--",
-                    entry_date, entry_time, fmt_display(entry_date),
-                    exit_date,  exit_time,
-                    fmt_display(exit_date) if exit_date else "--",
-                    dur["duration_minutes"] if dur else None,
-                    amount, status,
-                ))
-                added += 1
+            doc = {
+                "token":            token,
+                "lorry":            lorry,
+                "driver":           safe_str(r.get("driver"),  MAX_NAME_LEN),
+                "phone":            safe_str(r.get("phone"),   MAX_PHONE_LEN),
+                "remarks":          safe_str(r.get("remarks"), MAX_REMARKS_LEN),
+                "entry_date":       entry_date,
+                "entry_time":       entry_time,
+                "entry_display":    fmt_display(entry_date),
+                "exit_date":        exit_date,
+                "exit_time":        exit_time,
+                "exit_display":     fmt_display(exit_date) if exit_date else "--",
+                "duration_minutes": dur["duration_minutes"] if dur else None,
+                "amount":           amount,
+                "status":           status,
+                "created_at":       now_iso(),
+            }
+            records_col.insert_one(doc)
+            added += 1
 
-            except Exception as e:
-                errors.append({"row": i + 1, "error": str(e)})
+        except Exception as e:
+            errors.append({"row": i + 1, "error": str(e)})
 
     resp = {"ok": True, "added": added, "message": f"Imported {added} of {len(records)} records"}
     if errors:
@@ -636,109 +626,123 @@ def import_records():
 #  PRINT QUEUE
 # ================================================================
 
+def pq_to_dict(doc) -> dict:
+    return {
+        "id":         doc.get("seq_id"),
+        "job_data":   doc.get("job_data"),
+        "status":     doc.get("status"),
+        "created_at": doc.get("created_at"),
+        "ack_at":     doc.get("ack_at"),
+    }
+
+
 @app.post("/api/print-queue")
 def enqueue_print():
-    secret = os.environ.get("PRINT_SECRET", "KPR2024SECRET")
-    if request.headers.get("X-Print-Token", "") != secret:
+    if not _check_print_auth():
         return err("Unauthorized", 401)
     data = request.get_json(silent=True)
     if not data:
         return err("No JSON body")
-    import json
-    with db_conn() as con:
-        con.execute(
-            "INSERT INTO print_queue (job_data, status) VALUES (?, 'pending')",
-            (json.dumps(data),)
-        )
-        job_id = con.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-    return ok({"job_id": job_id, "message": "Print job queued"})
+
+    seq_id = next_seq("print_queue")
+    doc = {
+        "seq_id":     seq_id,
+        "job_data":   data,
+        "status":     "pending",
+        "created_at": now_iso(),
+        "ack_at":     None,
+    }
+    print_queue_col.insert_one(doc)
+    return ok({"job_id": seq_id, "message": "Print job queued"})
 
 
 @app.get("/api/print-queue/pending")
 def get_pending_jobs():
-    secret = os.environ.get("PRINT_SECRET", "KPR2024SECRET")
-    if request.headers.get("X-Print-Token", "") != secret:
+    if not _check_print_auth():
         return err("Unauthorized", 401)
-    import json
-    with db_conn() as con:
-        rows = con.execute(
-            "SELECT id, job_data, created_at FROM print_queue WHERE status='pending' ORDER BY id ASC"
-        ).fetchall()
+    docs = list(
+        print_queue_col.find({"status": "pending"}).sort("seq_id", ASCENDING)
+    )
     jobs = []
-    for row in rows:
-        try:
-            jobs.append({"id": row["id"], "data": json.loads(row["job_data"]), "created_at": row["created_at"]})
-        except Exception:
-            pass
+    for doc in docs:
+        jobs.append({
+            "id":         doc["seq_id"],
+            "data":       doc["job_data"],
+            "created_at": doc["created_at"],
+        })
     return ok(jobs)
 
 
 @app.route("/api/print-queue/<int:job_id>/ack", methods=["PATCH"])
 def ack_print_job(job_id: int):
-    secret = os.environ.get("PRINT_SECRET", "KPR2024SECRET")
-    if request.headers.get("X-Print-Token", "") != secret:
+    if not _check_print_auth():
         return err("Unauthorized", 401)
     body   = request.get_json(silent=True) or {}
     status = "done" if body.get("success", True) else "failed"
-    with db_conn() as con:
-        row = con.execute("SELECT id FROM print_queue WHERE id=?", (job_id,)).fetchone()
-        if not row:
-            return err("Job not found", 404)
-        con.execute(
-            "UPDATE print_queue SET status=?, ack_at=datetime('now') WHERE id=?",
-            (status, job_id)
-        )
+
+    result = print_queue_col.update_one(
+        {"seq_id": job_id},
+        {"$set": {"status": status, "ack_at": now_iso()}}
+    )
+    if result.matched_count == 0:
+        return err("Job not found", 404)
     return ok({"job_id": job_id, "status": status})
 
 
 @app.get("/api/print-queue")
 def list_print_queue():
-    secret = os.environ.get("PRINT_SECRET", "KPR2024SECRET")
-    if request.headers.get("X-Print-Token", "") != secret:
+    if not _check_print_auth():
         return err("Unauthorized", 401)
-    import json
-    with db_conn() as con:
-        rows = con.execute(
-            "SELECT id, status, created_at, ack_at, job_data FROM print_queue ORDER BY id DESC LIMIT 100"
-        ).fetchall()
+    docs = list(print_queue_col.find().sort("seq_id", DESCENDING).limit(100))
     jobs = []
-    for row in rows:
-        try:
-            d = json.loads(row["job_data"])
-            jobs.append({"id": row["id"], "status": row["status"],
-                         "created_at": row["created_at"], "ack_at": row["ack_at"],
-                         "token": d.get("token"), "lorry": d.get("lorry"), "type": d.get("type")})
-        except Exception:
-            pass
+    for doc in docs:
+        d = doc.get("job_data", {})
+        jobs.append({
+            "id":         doc["seq_id"],
+            "status":     doc["status"],
+            "created_at": doc["created_at"],
+            "ack_at":     doc.get("ack_at"),
+            "token":      d.get("token"),
+            "lorry":      d.get("lorry"),
+            "type":       d.get("type"),
+        })
     return ok(jobs)
 
 
 @app.delete("/api/print-queue/<int:job_id>")
 def delete_print_job(job_id: int):
-    secret = os.environ.get("PRINT_SECRET", "KPR2024SECRET")
-    if request.headers.get("X-Print-Token", "") != secret:
+    if not _check_print_auth():
         return err("Unauthorized", 401)
-    with db_conn() as con:
-        con.execute("DELETE FROM print_queue WHERE id=?", (job_id,))
+    print_queue_col.delete_one({"seq_id": job_id})
     return ok(message=f"Job {job_id} deleted")
 
 
 @app.delete("/api/print-queue")
 def clear_old_print_jobs():
-    secret = os.environ.get("PRINT_SECRET", "KPR2024SECRET")
-    if request.headers.get("X-Print-Token", "") != secret:
+    if not _check_print_auth():
         return err("Unauthorized", 401)
-    with db_conn() as con:
-        con.execute(
-            "DELETE FROM print_queue WHERE status != 'pending' AND created_at < datetime('now', '-7 days')"
-        )
+    cutoff = (datetime.datetime.now(IST) - datetime.timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%S")
+    print_queue_col.delete_many({
+        "status":     {"$ne": "pending"},
+        "created_at": {"$lt": cutoff}
+    })
     return ok(message="Old jobs cleaned up")
+
+
+
+# ── API catch-all — must be LAST route registered ────────────────
+# Catches any /api/* path that has no matching route (e.g. /api/admin/*)
+# Without this, Flask's static file handler serves index.html (200)
+# for unmatched GET requests instead of a proper 404.
+@app.route("/api/<path:subpath>", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
+def api_catch_all(subpath):
+    return err(f"Endpoint /api/{subpath} not found", 404)
 
 
 # ── Run ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print(f"🚛 KPR Transport API running at http://localhost:{PORT}")
-    print(f"📁 Database: {DB_PATH}")
+    print(f"🍃 Database: MongoDB Atlas → {DB_NAME}")
     print(f"🗓  Billing: DAY-WISE — (exitDate − entryDate) days × rate (min 1 day)")
     print(f"🖨  Print Queue: enabled")
     app.run(host="0.0.0.0", port=PORT, debug=False)

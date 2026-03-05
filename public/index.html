@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -28,129 +28,144 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
   <link rel="stylesheet" href="style.css">
   <style>
-    /* ── Time input row ─────────────────────────────────────── */
-    .time-row {
-      display: flex;
-      gap: 8px;
-      align-items: flex-end;
-    }
-    .time-row input[type="time"] {
-      flex: 1;
-      font-family: 'Share Tech Mono', monospace;
-      font-size: 18px;
-      font-weight: 600;
-      color: #f59e0b;
-      letter-spacing: 1px;
-      background: #12161e;
-      border: 1.5px solid #1e2736;
-      border-radius: 12px;
-      padding: 13px 16px;
-      outline: none;
-      transition: border-color .2s;
-      -webkit-appearance: none;
-    }
-    .time-row input[type="time"]:focus {
-      border-color: #f59e0b;
-    }
-    .time-row input[type="time"].time-flash {
-      border-color: #22c55e;
-      box-shadow: 0 0 0 3px rgba(34,197,94,.18);
-    }
-    .inp-time-full {
-      width: 100%;
-      font-family: 'Share Tech Mono', monospace;
-      font-size: 18px;
-      font-weight: 600;
-      color: #f59e0b;
-      letter-spacing: 1px;
-      background: #12161e;
-      border: 1.5px solid #1e2736;
-      border-radius: 12px;
-      padding: 13px 16px;
-      outline: none;
-      transition: border-color .2s;
-      -webkit-appearance: none;
-    }
-    .inp-time-full:focus { border-color: #f59e0b; }
-    .inp-time-full.time-flash {
-      border-color: #22c55e;
-      box-shadow: 0 0 0 3px rgba(34,197,94,.18);
-    }
-    .btn-now {
-      flex-shrink: 0;
-      background: #1e2736;
-      border: 1.5px solid #2a3650;
-      border-radius: 10px;
-      color: #7dd3fc;
-      font-size: 12px;
-      font-family: 'Share Tech Mono', monospace;
-      font-weight: 600;
-      letter-spacing: .5px;
-      padding: 10px 14px;
-      cursor: pointer;
-      transition: background .15s, border-color .15s;
-      white-space: nowrap;
-    }
-    .btn-now:active { background: #253049; }
-    .time-hint {
-      font-size: 10px;
-      color: #3a4a60;
-      margin-top: 4px;
-      font-family: 'Share Tech Mono', monospace;
-    }
+  /* ── Time input row ─────────────────────────────────────── */
+  .time-row {
+    display: flex;
+    gap: 8px;
+    align-items: flex-end;
+  }
+  .time-row input[type="time"] {
+    flex: 1;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 18px;
+    font-weight: 600;
+    color: #f59e0b;
+    letter-spacing: 1px;
+    background: #12161e;
+    border: 1.5px solid #1e2736;
+    border-radius: 12px;
+    padding: 13px 16px;
+    outline: none;
+    transition: border-color .2s;
+    -webkit-appearance: none;
+  }
+  .time-row input[type="time"]:focus {
+    border-color: #f59e0b;
+  }
+  .time-row input[type="time"].time-flash {
+    border-color: #22c55e;
+    box-shadow: 0 0 0 3px rgba(34,197,94,.18);
+  }
+  .inp-time-full {
+    width: 100%;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 18px;
+    font-weight: 600;
+    color: #f59e0b;
+    letter-spacing: 1px;
+    background: #12161e;
+    border: 1.5px solid #1e2736;
+    border-radius: 12px;
+    padding: 13px 16px;
+    outline: none;
+    transition: border-color .2s;
+    -webkit-appearance: none;
+  }
+  .inp-time-full:focus { border-color: #f59e0b; }
+  .inp-time-full.time-flash {
+    border-color: #22c55e;
+    box-shadow: 0 0 0 3px rgba(34,197,94,.18);
+  }
+  .btn-now {
+    flex-shrink: 0;
+    background: #1e2736;
+    border: 1.5px solid #2a3650;
+    border-radius: 10px;
+    color: #7dd3fc;
+    font-size: 12px;
+    font-family: 'Share Tech Mono', monospace;
+    font-weight: 600;
+    letter-spacing: .5px;
+    padding: 10px 14px;
+    cursor: pointer;
+    transition: background .15s, border-color .15s;
+    white-space: nowrap;
+  }
+  .btn-now:active { background: #253049; }
+  .time-hint {
+    font-size: 10px;
+    color: #3a4a60;
+    margin-top: 4px;
+    font-family: 'Share Tech Mono', monospace;
+  }
+  .exit-lorry-search {
+    margin-top: 4px;
+  }
+  .exit-lorry-input {
+    letter-spacing: 1.5px;
+  }
 
-    /* ── Thermal Receipt Styles ─────────────────────────────── */
-    .th-receipt {
-      background: #fff;
-      color: #000;
-      font-family: "Courier New", monospace;
-      padding: 14px;
-      border-radius: 8px;
-      width: 100%;
-      max-width: 300px;
-      margin: 0 auto;
-    }
-    .th-header { text-align: center; padding-bottom: 6px; }
-    .th-title  { font-size: 16px; font-weight: bold; letter-spacing: 1px; }
-    .th-sub    { font-size: 12px; margin-top: 2px; color: #222; }
-    .th-dash   { border-top: 1px dashed #000; margin: 6px 0; }
-    .th-type   { text-align: center; font-weight: bold; font-size: 14px; padding: 4px 0; }
-    .th-table  { width: 100%; font-size: 13px; border-collapse: collapse; }
-    .th-table td { padding: 3px 4px; vertical-align: top; color: #000; }
-    .th-table td:first-child { white-space: nowrap; font-weight: bold; width: 108px; }
-    .th-total-row td { font-size: 14px; font-weight: bold; border-top: 1px dashed #000; padding-top: 6px; }
-    .th-note   { font-size: 11px; line-height: 1.7; padding: 4px 2px; color: #333; }
-    .th-footer { text-align: center; font-weight: bold; font-size: 13px; padding: 6px 0; letter-spacing: 1px; }
-    .th-qr-wrap { text-align: center; padding: 10px 0 4px; }
-    .th-qr-wrap img, .th-qr-wrap canvas { display: inline-block !important; }
-    .th-upi    { font-size: 12px; font-weight: bold; margin-top: 6px; color: #000; }
+  /* ── Thermal Receipt Styles ─────────────────────────────── */
+  .th-receipt {
+    background: #fff;
+    color: #000;
+    font-family: "Courier New", monospace;
+    padding: 14px;
+    border-radius: 8px;
+    width: 100%;
+    max-width: 300px;
+    margin: 0 auto;
+  }
+  .th-header { text-align: center; padding-bottom: 6px; }
+  .th-title  { font-size: 16px; font-weight: bold; letter-spacing: 1px; }
+  .th-sub    { font-size: 12px; margin-top: 2px; color: #222; }
+  .th-dash   { border-top: 1px dashed #000; margin: 6px 0; }
+  .th-type   { text-align: center; font-weight: bold; font-size: 14px; padding: 4px 0; }
+  .th-table  { width: 100%; font-size: 13px; border-collapse: collapse; }
+  .th-table td { padding: 3px 4px; vertical-align: top; color: #000; }
+  .th-table td:first-child { white-space: nowrap; font-weight: bold; width: 108px; }
+  .th-total-row td { font-size: 14px; font-weight: bold; border-top: 1px dashed #000; padding-top: 6px; }
+  .th-note   { font-size: 11px; line-height: 1.7; padding: 4px 2px; color: #333; }
+  .th-footer { text-align: center; font-weight: bold; font-size: 13px; padding: 6px 0; letter-spacing: 1px; }
+  .th-qr-wrap { text-align: center; padding: 10px 0 4px; }
+  .th-qr-wrap img, .th-qr-wrap canvas { display: inline-block !important; }
+  .th-upi    { font-size: 12px; font-weight: bold; margin-top: 6px; color: #000; }
 
-    /* ── Pull to Refresh ─────────────────────────────────── */
-    .ptr-indicator {
-      position: fixed;
-      top: 62px; /* below header */
-      left: 0; right: 0;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
-      height: 52px;
-      background: #12161e;
-      color: #f59e0b;
-      font-family: 'Share Tech Mono', monospace;
-      font-size: 13px;
-      letter-spacing: 1px;
-      transform: translateY(-52px);
-      transition: transform 0.2s ease;
-      z-index: 50;
-      border-bottom: 1px solid #1e2736;
-    }
-    .ptr-indicator.ptr-visible  { transform: translateY(0); }
-    .ptr-indicator.ptr-loading  { transform: translateY(0); }
-    .ptr-spinner { font-size: 18px; display: inline-block; transition: transform 0.2s; }
-    .ptr-indicator.ptr-ready .ptr-spinner  { transform: rotate(180deg); }
-    .ptr-indicator.ptr-loading .ptr-spinner { animation: ptr-spin 0.7s linear infinite; }
-    @keyframes ptr-spin { to { transform: rotate(360deg); } }
+  /* ── Pull to Refresh ─────────────────────────────────── */
+  .ptr-indicator {
+    position: fixed;
+    top: 62px; /* below header */
+    left: 0; right: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: 52px;
+    background: #12161e;
+    color: #f59e0b;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 13px;
+    letter-spacing: 1px;
+    transform: translateY(-52px);
+    transition: transform 0.2s ease;
+    z-index: 50;
+    border-bottom: 1px solid #1e2736;
+  }
+  .ptr-indicator.ptr-visible  { transform: translateY(0); }
+  .ptr-indicator.ptr-loading  { transform: translateY(0); }
+  .ptr-spinner { font-size: 18px; display: inline-block; transition: transform 0.2s; }
+  .ptr-indicator.ptr-ready .ptr-spinner  { transform: rotate(180deg); }
+  .ptr-indicator.ptr-loading .ptr-spinner { animation: ptr-spin 0.7s linear infinite; }
+  @keyframes ptr-spin { to { transform: rotate(360deg); } }
+
+  /* ── Rate Input ────────────────────────────────────────── */
+  .rate-input {
+    font-size: 28px;
+    font-family: 'Share Tech Mono', monospace;
+    color: #f59e0b;
+    font-weight: bold;
+    text-align: center;
+  }
   </style>
 </head>
 <body>
@@ -215,6 +230,7 @@
       </div>
 
       <div class="fg">
+        <label for="entryLorry">Lorry Number *</label>
         <input
           type="text"
           id="entryLorry"
@@ -222,36 +238,37 @@
           autocomplete="off"
           autocorrect="off"
           spellcheck="false"
+          placeholder="Enter lorry number"
           oninput="this.value=this.value.toUpperCase()">
       </div>
 
       <!-- Entry Date -->
       <div class="fg">
-        <label>Entry Date * 📅</label>
-        <input type="date" id="entryDateInput" class="inp-date">
+        <label for="entryDateInput">Entry Date * 📅</label>
+        <input type="date" id="entryDateInput" class="inp-date" title="Entry date">
         <div class="time-hint">Auto-filled with today · tap to change</div>
       </div>
 
       <!-- Entry Time (live, editable) -->
       <div class="fg">
         <label>Entry Time * 🕐</label>
-        <input type="time" id="entryTimeInput" class="inp-time-full">
+        <input type="time" id="entryTimeInput" class="inp-time-full" title="Entry time in HH:MM format">
         <div class="time-hint">Live time auto-fills · tap to set manually</div>
       </div>
 
       <div class="fg">
         <label>Driver Name (Optional)</label>
-        <input type="text" id="entryDriver" autocomplete="name">
+        <input type="text" id="entryDriver" autocomplete="name" placeholder="Enter driver name">
       </div>
 
       <div class="fg">
         <label>Driver Phone (Optional)</label>
-        <input type="tel" id="entryPhone" maxlength="15" autocomplete="tel">
+        <input type="tel" id="entryPhone" maxlength="15" autocomplete="tel" title="Driver phone number" placeholder="Enter phone number">
       </div>
 
       <div class="fg">
         <label>Remarks (Optional)</label>
-        <input type="text" id="entryRemarks">
+        <input type="text" id="entryRemarks" placeholder="Enter any remarks">
       </div>
 
       <button class="btn btn-primary" onclick="recordEntry()">🎫 Record Entry &amp; Print Receipt</button>
@@ -270,44 +287,47 @@
       <div class="card-title">🔓 Process Exit</div>
 
       <div class="fg">
-        <div style="position:relative">
-          <span style="position:absolute;left:16px;top:50%;transform:translateY(-50%);font-family:'Share Tech Mono',monospace;font-size:22px;color:#f59e0b;pointer-events:none;font-weight:bold">#</span>
+        <label for="exitToken">Serial No. *</label>
+        <div class="exit-token-wrap">
+          <span class="exit-token-prefix">#</span>
           <input
             type="number"
             id="exitToken"
-            class="inp-token"
-            style="padding-left:42px"
+            class="inp-token exit-token-input"
             min="1"
             autocomplete="off"
+            title="Enter serial number"
+            placeholder="Enter serial number"
             oninput="lookupToken(this.value)"
             onkeydown="if(event.key==='Enter') processExit()">
         </div>
       </div>
 
       <!-- Lorry Number fallback search -->
-      <div class="fg" style="margin-top:4px">
+      <div class="fg exit-lorry-search">
         <input
           type="text"
           id="exitLorrySearch"
-          class="inp-lorry"
+          class="inp-lorry exit-lorry-input"
           autocomplete="off"
           autocorrect="off"
           spellcheck="false"
-          oninput="this.value=this.value.toUpperCase(); lookupByLorry(this.value)"
-          style="letter-spacing:1.5px">
+          title="Enter lorry number to search"
+          placeholder="Enter lorry number"
+          oninput="this.value=this.value.toUpperCase(); lookupByLorry(this.value)">
         <div class="time-hint">Driver forgot serial no? Enter lorry number to find it</div>
       </div>
       <!-- Exit Date -->
       <div class="fg">
-        <label>Exit Date * 📅</label>
-        <input type="date" id="exitDateInput" class="inp-date">
+        <label for="exitDateInput">Exit Date * 📅</label>
+        <input type="date" id="exitDateInput" class="inp-date" title="Exit date">
         <div class="time-hint">Auto-filled with today · tap to change</div>
       </div>
 
       <!-- Exit Time -->
       <div class="fg">
-        <label>Exit Time * 🕐</label>
-        <input type="time" id="exitTimeInput" class="inp-time-full">
+        <label for="exitTimeInput">Exit Time * 🕐</label>
+        <input type="time" id="exitTimeInput" class="inp-time-full" title="Exit time in HH:MM format">
         <div class="time-hint">Live time auto-fills · tap to set manually</div>
       </div>
 
@@ -342,7 +362,7 @@
 
     <div class="search-wrap">
       <span class="s-icon">🔍</span>
-      <input type="text" oninput="filterParked(this.value)">
+      <input type="text" placeholder="Search parked lorries" oninput="filterParked(this.value)">
     </div>
 
     <div id="parkedList"></div>
@@ -373,7 +393,7 @@
 
     <div class="search-wrap">
       <span class="s-icon">🔍</span>
-      <input type="text" id="recSearch" oninput="renderRecords()">
+      <input type="text" id="recSearch" placeholder="Search records" oninput="renderRecords()">
     </div>
 
     <div class="pills">
@@ -393,13 +413,14 @@
     <div class="card">
       <div class="card-title">⚙ Billing Rate</div>
       <div class="fg">
-        <label>Daily Parking Rate (Rs. per day)</label>
+        <label for="hourlyRateInput">Daily Parking Rate (Rs. per day)</label>
         <input
           type="number"
           id="hourlyRateInput"
           value="130"
           min="1"
-          style="font-size:28px;font-family:'Share Tech Mono',monospace;color:#f59e0b;font-weight:bold;text-align:center"
+          class="rate-input"
+          title="Daily parking rate in rupees"
           onchange="saveRate()">
       </div>
       <div style="background:#12161e;border-radius:10px;padding:12px;font-size:12px;color:#5a6a80;line-height:1.9;text-align:center">

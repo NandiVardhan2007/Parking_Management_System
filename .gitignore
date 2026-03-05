@@ -1,51 +1,37 @@
-# ==============================
-#  KPR TRANSPORT — .gitignore
-# ==============================
+# ── Secrets — NEVER commit these ────────────────────────────
+.env
+.env.*
+!.env.example
 
-# Database (never commit live data)
-*.db
-*.db-shm
-*.db-wal
-*.sqlite
-*.sqlite3
-
-# Python
+# ── Python ────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
-.Python
-env/
-venv/
-.venv/
-ENV/
-
-# pip
+*.egg
 *.egg-info/
 dist/
 build/
 .eggs/
+venv/
+.venv/
+env/
+.Python
 
-# Environment variables
-.env
-.env.local
-.env.production
+# ── Database (local SQLite fallback) ─────────────────────────
+*.db
+*.sqlite
+*.sqlite3
 
-# OS files
+# ── OS / Editor ───────────────────────────────────────────────
 .DS_Store
 Thumbs.db
-desktop.ini
-
-# Editors
-.vscode/
-.idea/
 *.swp
 *.swo
-*~
+.idea/
+.vscode/
+*.iml
 
-# Logs
+# ── Logs ──────────────────────────────────────────────────────
 *.log
 logs/
-
-# Gunicorn
-gunicorn.pid

@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: kpr-parking
+    runtime: python
+    region: singapore   # closest to India (IST)
+    plan: free
+
+    buildCommand: pip install -r requirements.txt
+
+    # Render injects PORT automatically — gunicorn binds to it
+    startCommand: gunicorn server:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+
+    # Health check — Render pings this after every deploy
+    healthCheckPath: /api/health
+
+    # All secrets set here (or in Render dashboard → Environment)
+    envVars:
+      - key: MONGO_URI
+        sync: false          # marked secret — set value in Render dashboard
+
+      - key: MONGO_DB
+        value: kpr_parking
+
+      - key: PRINT_SECRET
+        sync: false          # marked secret — set value in Render dashboard
+
+      - key: GSHEET_ENTRY_URL
+        sync: false
+
+      - key: GSHEET_EXIT_URL
+        sync: false
+
+      - key: ALLOWED_ORIGINS
+        value: "*"           # change to your frontend URL after deploy
+                             # e.g. https://kpr-parking.onrender.com
+
+      # Force Python to flush stdout so logs appear in Render dashboard
+      - key: PYTHONUNBUFFERED
+        value: "1"

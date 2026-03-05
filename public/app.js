@@ -37,14 +37,31 @@ let initialSyncDone = false;
 
 // ── API helpers ──────────────────────────────────────────────
 async function apiFetch(path, opts = {}) {
-  const res  = await fetch(API + path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...opts
-  });
+  const mergedHeaders = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+  const res = await fetch(API + path, { ...opts, headers: mergedHeaders });
+
+  // If server returns HTML (crash/error page), show a meaningful error
+  // instead of "Unexpected token '<'" which is confusing
+  const ct = res.headers.get('content-type') || '';
+  if (!ct.includes('application/json')) {
+    if (!res.ok) {
+      throw new Error(
+        `Server error (HTTP ${res.status}). ` +
+        `Common causes: MONGO_URI not set in Render Environment, ` +
+        `or MongoDB Atlas IP whitelist missing 0.0.0.0/0. ` +
+        `Diagnose at: ${API}/health`
+      );
+    }
+    throw new Error(`Server returned non-JSON (${res.status}). Check Render service logs.`);
+  }
+
   const json = await res.json();
   if (!json.ok) throw new Error(json.error || 'API error');
   return json;
 }
+
+
+
 
 async function syncFromServer() {
   try {

@@ -128,7 +128,20 @@ function tick() {
 setInterval(tick, 1000);
 tick();
 
-// ── Time helpers ─────────────────────────────────────────────
+// ── Date/Time helpers ────────────────────────────────────────
+
+/**
+ * Returns today's date as "YYYY-MM-DD" using the DEVICE'S LOCAL timezone.
+ * This prevents the UTC-midnight bug where e.g. 12:48 AM IST on 03/03
+ * would wrongly return "02/03" because UTC is still on the previous day.
+ */
+function localDateStr() {
+  const n = new Date();
+  const y = n.getFullYear();
+  const m = String(n.getMonth() + 1).padStart(2, '0');
+  const d = String(n.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
 
 /** Returns current time as "HH:MM" (24h) for <input type="time"> */
 function liveTime24() {
@@ -175,7 +188,7 @@ function fmtDuration(days) {
 
 /** Full billing calc → { days, display, amount } */
 function calcBilling(entryDate, entryTime, exitDate, exitTime) {
-  const days = daysBetween(entryDate, exitDate || new Date().toISOString().split('T')[0]);
+  const days = daysBetween(entryDate, exitDate || localDateStr());
   return {
     days,
     totalMin:       days * 1440,  // kept for legacy compat
@@ -187,7 +200,7 @@ function calcBilling(entryDate, entryTime, exitDate, exitTime) {
 
 // ── Date/Time input init ──────────────────────────────────────
 function initAllDateTimeInputs() {
-  const today = new Date().toISOString().split('T')[0];
+  const today = localDateStr();
   const now   = liveTime24();
   const ed = document.getElementById('entryDateInput');
   const et = document.getElementById('entryTimeInput');
@@ -202,7 +215,7 @@ function syncExitDateTime() {
   const ed = document.getElementById('exitDateInput');
   const et = document.getElementById('exitTimeInput');
   // Only auto-fill if user hasn't manually set them
-  if (ed && !exitDateManual) ed.value = new Date().toISOString().split('T')[0];
+  if (ed && !exitDateManual) ed.value = localDateStr();
   if (et && !exitTimeManual) et.value = liveTime24();
 }
 
@@ -221,12 +234,12 @@ function startEntryTimeTick() {
     }
     if (!entryDateManual) {
       const ed = document.getElementById('entryDateInput');
-      if (ed) ed.value = new Date().toISOString().split('T')[0];
+      if (ed) ed.value = localDateStr();
     }
     // Exit date/time: only auto-fill if user hasn't manually edited them
     const _xd = document.getElementById('exitDateInput');
     const _xt = document.getElementById('exitTimeInput');
-    if (_xd && !exitDateManual) _xd.value = new Date().toISOString().split('T')[0];
+    if (_xd && !exitDateManual) _xd.value = localDateStr();
     if (_xt && !exitTimeManual) _xt.value = liveTime24();
   }, 10000); // refresh every 10s
 }
@@ -242,7 +255,7 @@ function goTab(tab, btn) {
     // Only auto-fill exit date/time when switching tabs if not manually set
     const _xd = document.getElementById('exitDateInput');
     const _xt = document.getElementById('exitTimeInput');
-    if (_xd && !exitDateManual) _xd.value = new Date().toISOString().split('T')[0];
+    if (_xd && !exitDateManual) _xd.value = localDateStr();
     if (_xt && !exitTimeManual) _xt.value = liveTime24();
     renderParked();
   }
@@ -278,7 +291,7 @@ async function recordEntry() {
   const dup = db.find(r => r.lorry === lorry && r.status === 'IN');
   if (dup) { notify('WARNING: ' + lorry + ' already parked! Serial #' + dup.token, 'error'); return; }
 
-  const entryDate = document.getElementById('entryDateInput').value || new Date().toISOString().split('T')[0];
+  const entryDate = document.getElementById('entryDateInput').value || localDateStr();
   const entryTime = document.getElementById('entryTimeInput').value || liveTime24();
   // Always have a live fallback — no error needed
 
@@ -332,7 +345,7 @@ function clearEntry() {
   // Reset date/time back to live auto-fill
   entryDateManual = false;
   entryTimeManual = false;
-  document.getElementById('entryDateInput').value = new Date().toISOString().split('T')[0];
+  document.getElementById('entryDateInput').value = localDateStr();
   document.getElementById('entryTimeInput').value = liveTime24();
 }
 
@@ -358,7 +371,7 @@ function lookupToken(val) {
     return;
   }
 
-  const exitDate = document.getElementById('exitDateInput').value  || new Date().toISOString().split('T')[0];
+  const exitDate = document.getElementById('exitDateInput').value  || localDateStr();
   const exitTime = document.getElementById('exitTimeInput').value  || liveTime24();
   const bill     = calcBilling(rec.entryDate, rec.entryTime || '00:00', exitDate, exitTime);
 
@@ -428,7 +441,7 @@ function clearExitForm() {
   document.getElementById('lookupCard').style.display = 'none';
   exitDateManual = false;
   exitTimeManual = false;
-  document.getElementById('exitDateInput').value = new Date().toISOString().split('T')[0];
+  document.getElementById('exitDateInput').value = localDateStr();
   document.getElementById('exitTimeInput').value = liveTime24();
 }
 
@@ -709,7 +722,7 @@ function renderParked(filter) {
     el.innerHTML = `<div class="empty"><div class="ei">P</div><p>${filter ? 'No results' : 'No lorries parked'}</p></div>`;
     return;
   }
-  const exitDate = document.getElementById('exitDateInput')?.value || new Date().toISOString().split('T')[0];
+  const exitDate = document.getElementById('exitDateInput')?.value || localDateStr();
   const exitTime = document.getElementById('exitTimeInput')?.value || liveTime24();
   el.innerHTML = parked.map(r => {
     const bill       = calcBilling(r.entryDate, r.entryTime || '00:00', exitDate, exitTime);
@@ -741,7 +754,7 @@ function goToExit(token) {
   const et = document.getElementById('exitTimeInput');
   if (et && !et.value) et.value = liveTime24();
   const ed = document.getElementById('exitDateInput');
-  if (ed && !ed.value) ed.value = new Date().toISOString().split('T')[0];
+  if (ed && !ed.value) ed.value = localDateStr();
 
   document.getElementById('exitToken').value = token;
   lookupToken(String(token));
@@ -817,7 +830,7 @@ function renderRecords() {
 
 // ── STATS ─────────────────────────────────────────────────────
 function updateStats() {
-  const today  = new Date().toISOString().split('T')[0];
+  const today  = localDateStr();
   const parked = db.filter(r => r.status === 'IN').length;
   const tEnt   = db.filter(r => r.entryDate === today).length;
   const tExit  = db.filter(r => r.status === 'OUT' && r.exitDate === today).length;
@@ -898,7 +911,7 @@ function importExcel(event) {
         rows.forEach(row => {
           const lorry = (row['Lorry Number'] || row['lorry'] || '').toString().toUpperCase().trim();
           if (!lorry) return;
-          const entryDate = row['Entry Date'] ? new Date(row['Entry Date']).toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
+          const entryDate = row['Entry Date'] ? new Date(row['Entry Date']).toISOString().split('T')[0] : localDateStr();
           const entryTime = row['Entry Time'] ? to24h(String(row['Entry Time'])) : null;
           const exitDate  = row['Exit Date']  ? new Date(row['Exit Date']).toISOString().split('T')[0]  : null;
           const exitTime  = row['Exit Time']  ? to24h(String(row['Exit Time']))  : null;
@@ -960,7 +973,7 @@ function exportExcel(filter) {
     {wch:10},{wch:5},{wch:16},{wch:16},{wch:14},{wch:20},
     {wch:13},{wch:11},{wch:12},{wch:11},{wch:22},{wch:12},{wch:12},{wch:10}
   ];
-  XLSX.writeFile(wb, fname + '_' + new Date().toISOString().split('T')[0] + '.xlsx');
+  XLSX.writeFile(wb, fname + '_' + localDateStr() + '.xlsx');
   notify('Exported ' + recs.length + ' records', 'success');
 }
 
@@ -977,7 +990,7 @@ document.addEventListener('DOMContentLoaded', async function () {
   if (rateEl) rateEl.value = dailyRate;
   document.getElementById('rateShow').textContent = dailyRate;
 
-  const today = new Date().toISOString().split('T')[0];
+  const today = localDateStr();
   const now   = liveTime24();
   const _ed = document.getElementById('entryDateInput');
   const _et = document.getElementById('entryTimeInput');

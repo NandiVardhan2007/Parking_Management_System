@@ -863,7 +863,7 @@ function renderRecords() {
           <div class="rc-amt">${amtText}</div>
           <div class="rc-acts">
             ${entryBtn}${exitBtn}
-            <button class="btn btn-sm btn-red-sm" onclick="deleteRecord(${r.id})">Del</button>
+            <button class="btn btn-sm btn-red-sm" onclick="deleteRecord('${r.id}')">Del</button>
           </div>
         </div>
       </div>`;
@@ -900,7 +900,7 @@ async function deleteRecord(id) {
     try { await apiFetch(`/records/${id}`, { method: 'DELETE' }); }
     catch (e) { notify('Server error: ' + e.message, 'error'); return; }
   }
-  db = db.filter(r => r.id !== id);
+  db = db.filter(r => String(r.id) !== String(id));
   saveLocal();
   renderRecords(); updateStats(); refreshToken();
   notify('Record deleted', 'info');

@@ -61,15 +61,51 @@ def get_db():
         counters_col    = _db["counters"]
         _client.admin.command("ping")
         _init_db()
-        print(f"[KPR] MongoDB connected → {DB_NAME}")
+        print(f"[KPR] MongoDB connected to {DB_NAME}")
         return None
     except Exception as exc:
         _db = None
         return f"MongoDB error: {exc}"
 
 
+# ── FIX: dedicated helper that always resyncs the counter ────────
+def _sync_token_counter():
+    """
+    Ensure the token counter document is >= the highest token
+    that actually exists in records_col.
+
+    Call this:
+      1. On every startup (inside _init_db)
+      2. Inside the DuplicateKeyError handler in create_record()
+      3. After bulk import
+
+    This makes the counter self-healing: even if Render restarts and
+    the counters collection is somehow reset (or behind), the very
+    next entry attempt will recover automatically.
+    """
+    try:
+        max_doc   = records_col.find_one({}, sort=[("token", DESCENDING)])
+        max_token = int(max_doc["token"]) if max_doc else 0
+
+        # Create if not exists, initialised to max_token
+        counters_col.update_one(
+            {"_id": "token"},
+            {"$setOnInsert": {"seq": max_token}},
+            upsert=True,
+        )
+        # If the document already exists but is BEHIND, bring it up
+        counters_col.update_one(
+            {"_id": "token", "seq": {"$lt": max_token}},
+            {"$set": {"seq": max_token}},
+        )
+        print(f"[KPR] Token counter synced: max_existing={max_token}")
+        return max_token
+    except Exception as e:
+        print(f"[KPR] _sync_token_counter error: {e}")
+        return 0
+
+
 def _init_db():
-    # Create indexes — NO background= kwarg (removed in PyMongo 4)
     for idx_kwargs in [
         {"keys": "token",      "unique": True},
         {"keys": "status"},
@@ -93,18 +129,9 @@ def _init_db():
         upsert=True,
     )
 
-    # Sync token counter so it is always >= max existing token
-    max_doc   = records_col.find_one({}, sort=[("token", DESCENDING)])
-    max_token = max_doc["token"] if max_doc else 0
-    counters_col.update_one(
-        {"_id": "token"},
-        {"$setOnInsert": {"seq": max_token}},
-        upsert=True,
-    )
-    counters_col.update_one(
-        {"_id": "token", "seq": {"$lt": max_token}},
-        {"$set": {"seq": max_token}},
-    )
+    # Always sync on startup — handles counter resets after redeploy
+    _sync_token_counter()
+
     counters_col.update_one(
         {"_id": "print_queue"},
         {"$setOnInsert": {"seq": 0}},
@@ -116,7 +143,7 @@ _startup_err = get_db()
 if _startup_err:
     print(f"[KPR] WARNING — DB not ready at startup: {_startup_err}")
 else:
-    print("[KPR] Database ready ✓")
+    print("[KPR] Database ready")
 
 
 def require_db():
@@ -241,19 +268,33 @@ if PUBLIC.exists():
 
 
 # ================================================================
-#  API ROUTES — every route has try/except → returns JSON on crash
+#  API ROUTES
 # ================================================================
 
 @app.get("/api/health")
 def health():
     db_err = get_db()
+    counter_seq = None
+    max_token   = None
+    try:
+        if counters_col is not None:
+            cdoc = counters_col.find_one({"_id": "token"})
+            counter_seq = cdoc["seq"] if cdoc else 0
+        if records_col is not None:
+            mdoc = records_col.find_one({}, sort=[("token", DESCENDING)])
+            max_token = mdoc["token"] if mdoc else 0
+    except Exception:
+        pass
     return jsonify({
-        "ok":               db_err is None,
-        "db":               "connected" if db_err is None else f"error: {db_err}",
-        "timestamp":        datetime.datetime.now(IST).isoformat(),
-        "timezone":         "IST",
-        "mongo_uri_set":    bool(MONGO_URI),
-        "print_secret_set": bool(PRINT_SECRET),
+        "ok":                  db_err is None,
+        "db":                  "connected" if db_err is None else f"error: {db_err}",
+        "timestamp":           datetime.datetime.now(IST).isoformat(),
+        "timezone":            "IST",
+        "mongo_uri_set":       bool(MONGO_URI),
+        "print_secret_set":    bool(PRINT_SECRET),
+        "token_counter":       counter_seq,
+        "max_token_in_db":     max_token,
+        "counter_in_sync":     counter_seq == max_token if (counter_seq is not None and max_token is not None) else None,
     })
 
 
@@ -388,18 +429,24 @@ def create_record():
             "status": "IN", "created_at": now_iso(),
         }
 
-        for _attempt in range(3):
+        # ── SELF-HEALING retry loop ──────────────────────────────────
+        # On DuplicateKeyError the counter was behind the actual records
+        # (e.g. after a Render restart where counters collection reset).
+        # We resync it to the real max and retry — up to 5 times.
+        for _attempt in range(5):
             try:
                 result = records_col.insert_one(doc.copy())
                 doc["_id"] = result.inserted_id
                 break
             except DuplicateKeyError:
-                token = next_token()
+                print(f"[KPR] DuplicateKeyError token={token} attempt={_attempt+1} — resyncing counter")
+                _sync_token_counter()   # ← bring counter up to real max
+                token      = next_token()
                 doc["token"] = token
         else:
-            return err("Could not assign unique token — try again", 500)
+            return err("Could not assign unique token after 5 attempts — please retry", 500)
 
-        rec = rec_to_dict(doc)
+        rec  = rec_to_dict(doc)
         rate = get_rate()
         _post_to_sheets(GSHEET_ENTRY_URL, {
             "type":"ENTRY","token":rec["token"],"lorry":rec["lorry"],
@@ -545,6 +592,10 @@ def import_records():
                 added += 1
             except Exception as e:
                 errors.append({"row":i+1,"error":str(e)})
+
+        # Always resync after bulk import to prevent drift
+        _sync_token_counter()
+
         resp = {"ok":True,"added":added,"message":f"Imported {added} of {len(records)} records"}
         if errors: resp["errors"] = errors
         return jsonify(resp)
@@ -630,11 +681,36 @@ def clear_old_print_jobs():
         return err(f"Cleanup error: {exc}", 500)
 
 
+# ── Admin: manual counter resync ──────────────────────────────────
+@app.post("/api/admin/resync-counter")
+def resync_counter():
+    """
+    Force-resync the token counter to the actual max in the DB.
+    Use this ONCE on an existing deployment to fix the restarted tokens.
+    Requires X-Print-Token header for auth.
+    """
+    if not _check_print_auth():
+        return err("Unauthorized — send X-Print-Token header", 401)
+    db_resp = require_db()
+    if db_resp: return db_resp
+    try:
+        new_max = _sync_token_counter()
+        cdoc    = counters_col.find_one({"_id": "token"})
+        seq     = cdoc["seq"] if cdoc else 0
+        return ok({
+            "max_token_found":    new_max,
+            "counter_now":        seq,
+            "next_token_will_be": seq + 1,
+        })
+    except Exception as exc:
+        return err(f"Resync failed: {exc}", 500)
+
+
 @app.route("/api/<path:subpath>", methods=["GET","POST","PUT","PATCH","DELETE"])
 def api_catch_all(subpath):
     return err(f"Endpoint /api/{subpath} not found", 404)
 
 
 if __name__ == "__main__":
-    print(f"🚛 KPR Transport Parking  →  http://localhost:{PORT}")
+    print(f"KPR Transport Parking  ->  http://localhost:{PORT}")
     app.run(host="0.0.0.0", port=PORT, debug=False)

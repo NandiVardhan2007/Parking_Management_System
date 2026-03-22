@@ -26,6 +26,8 @@
   <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Share+Tech+Mono&family=Exo+2:wght@300;400;600;700&display=swap" rel="stylesheet">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <!-- html2canvas: used to convert the receipt card into a JPEG for WhatsApp sharing -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
   <link rel="stylesheet" href="style.css">
   <style>
   /* ── Time input row ─────────────────────────────────────── */
@@ -166,6 +168,134 @@
     font-weight: bold;
     text-align: center;
   }
+
+  /* ── WhatsApp Button ──────────────────────────────────── */
+  .btn-wa {
+    background: linear-gradient(135deg, #25D366, #128C7E);
+    color: #fff;
+    box-shadow: 0 4px 18px rgba(37,211,102,0.32);
+    font-size: 15px;
+    gap: 10px;
+  }
+  .btn-wa:active { opacity: 0.88; }
+  .btn-wa svg { flex-shrink: 0; }
+
+  /* Receipt action buttons: WA spans full width, Print+Close share a row.
+     .rcpt-btns grid is defined in style.css — we only add the WA override. */
+  .rcpt-btns .btn-wa {
+    grid-column: 1 / -1;
+  }
+
+  /* ── Lorry Autocomplete Dropdown ─────────────────────────── */
+  .ac-wrap { position: relative; }
+
+  #lorryDropdown {
+    display: none;
+    position: absolute;
+    left: 0; right: 0;
+    top: calc(100% + 6px);
+    background: #1a2132;
+    border: 1.5px solid #f59e0b;
+    border-radius: 14px;
+    overflow: hidden;
+    z-index: 300;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.55);
+    max-height: 280px;
+    overflow-y: auto;
+  }
+
+  .ac-item {
+    padding: 12px 16px;
+    border-bottom: 1px solid #1e2736;
+    cursor: pointer;
+    transition: background 0.12s;
+    -webkit-tap-highlight-color: rgba(245,158,11,0.12);
+  }
+  .ac-item:last-child { border-bottom: none; }
+  .ac-item:active, .ac-item:hover { background: rgba(245,158,11,0.08); }
+
+  .ac-top {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 3px;
+  }
+  .ac-lorry {
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 16px;
+    font-weight: bold;
+    color: #f59e0b;
+    letter-spacing: 2px;
+    flex: 1;
+  }
+  .ac-sub {
+    font-size: 12px;
+    color: #5a6a80;
+    font-family: 'Exo 2', sans-serif;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .ac-badge {
+    font-size: 9px;
+    font-weight: 700;
+    font-family: 'Rajdhani', sans-serif;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border-radius: 20px;
+    flex-shrink: 0;
+  }
+  .ac-badge-in  { background: rgba(34,197,94,0.15);  color: #22c55e; border: 1px solid rgba(34,197,94,0.3);  }
+  .ac-badge-out { background: rgba(239,68,68,0.12);  color: #ef4444; border: 1px solid rgba(239,68,68,0.25); }
+
+  /* Auto-fill confirmation badge shown below lorry input */
+  #acFillBadge {
+    display: none;
+    margin-top: 7px;
+    background: rgba(34,197,94,0.10);
+    border: 1px solid rgba(34,197,94,0.28);
+    border-radius: 10px;
+    padding: 8px 14px;
+    font-size: 12px;
+    color: #22c55e;
+    font-family: 'Share Tech Mono', monospace;
+    letter-spacing: 0.3px;
+  }
+
+  /* These classes are used in the exit panel but missing from style.css */
+  .exit-token-wrap {
+    display: flex;
+    align-items: center;
+    background: var(--surface, #12161e);
+    border: 1.5px solid var(--border, #232d3f);
+    border-radius: 12px;
+    overflow: hidden;
+    transition: border-color 0.2s;
+  }
+  .exit-token-wrap:focus-within {
+    border-color: var(--accent, #f59e0b);
+    box-shadow: 0 0 0 3px rgba(245,158,11,0.12);
+  }
+  .exit-token-prefix {
+    padding: 14px 0 14px 16px;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 28px;
+    font-weight: bold;
+    color: var(--accent, #f59e0b);
+    letter-spacing: 4px;
+    user-select: none;
+  }
+  /* Override: the input inside the wrap needs no border of its own */
+  .exit-token-input {
+    flex: 1;
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    background: transparent !important;
+    padding-left: 4px !important;
+  }
   </style>
 </head>
 <body>
@@ -231,15 +361,21 @@
 
       <div class="fg">
         <label for="entryLorry">Lorry Number *</label>
-        <input
-          type="text"
-          id="entryLorry"
-          class="inp-lorry"
-          autocomplete="off"
-          autocorrect="off"
-          spellcheck="false"
-          placeholder="Enter lorry number"
-          oninput="this.value=this.value.toUpperCase()">
+        <div class="ac-wrap">
+          <input
+            type="text"
+            id="entryLorry"
+            class="inp-lorry"
+            autocomplete="off"
+            autocorrect="off"
+            spellcheck="false"
+            placeholder="Type lorry number to search"
+            oninput="this.value=this.value.toUpperCase(); lorryAutocomplete(this.value)"
+            onblur="setTimeout(hideLorryDropdown, 180)"
+            onfocus="lorryAutocomplete(this.value)">
+          <div id="lorryDropdown"></div>
+        </div>
+        <div id="acFillBadge"></div>
       </div>
 
       <!-- Entry Date -->
@@ -487,12 +623,21 @@
 <div class="receipt-ov" id="receiptOv">
   <div class="receipt" id="receiptContent"></div>
   <div class="rcpt-btns">
-    <button class="btn btn-primary btn-sm" style="width:100%;padding:14px" onclick="printReceipt()">🖨 Print</button>
-    <button class="btn btn-ghost   btn-sm" style="width:100%;padding:14px" onclick="closeReceipt()">✕ Close</button>
+    <!-- WhatsApp Share — spans both columns -->
+    <button class="btn btn-wa btn-sm" onclick="shareOnWhatsApp()">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
+      </svg>
+      Share on WhatsApp
+    </button>
+    <!-- Print and Close share the second row -->
+    <button class="btn btn-primary btn-sm" style="padding:14px" onclick="printReceipt()">🖨 Print</button>
+    <button class="btn btn-ghost   btn-sm" style="padding:14px" onclick="closeReceipt()">✕ Close</button>
   </div>
 </div>
 
 <script src="app.js"></script>
+<script src="wa-share.js"></script>
   <!-- PWA Install Banner -->
   <div id="pwaInstallBanner" style="
     display:none; position:fixed; bottom:80px; left:50%; transform:translateX(-50%);
@@ -547,12 +692,10 @@
         navigator.serviceWorker.register('/sw.js')
           .then(reg => {
             console.log('[KPR SW] Registered, scope:', reg.scope);
-            // Listen for updates
             reg.addEventListener('updatefound', () => {
               const newWorker = reg.installing;
               newWorker.addEventListener('statechange', () => {
                 if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
-                  // New version available — show subtle update notice
                   if (confirm('KPR Parking updated! Reload to get the latest version?')) {
                     newWorker.postMessage({ type: 'SKIP_WAITING' });
                     window.location.reload();
@@ -563,7 +706,6 @@
           })
           .catch(err => console.warn('[KPR SW] Registration failed:', err));
 
-        // Listen for sync messages from SW
         navigator.serviceWorker.addEventListener('message', e => {
           if (e.data && e.data.type === 'SYNC_NOW' && typeof fullRefresh === 'function') {
             fullRefresh();
@@ -578,11 +720,10 @@
     window.addEventListener('beforeinstallprompt', e => {
       e.preventDefault();
       _deferredPrompt = e;
-      // Only show banner if not already installed and not dismissed before
       if (!localStorage.getItem('kpr_pwa_dismissed')) {
         setTimeout(() => {
           document.getElementById('pwaInstallBanner').style.display = 'block';
-        }, 3000);  // show after 3 seconds
+        }, 3000);
       }
     });
 
@@ -590,14 +731,12 @@
       document.getElementById('pwaInstallBanner').style.display = 'none';
       _deferredPrompt = null;
       localStorage.setItem('kpr_pwa_installed', '1');
-      console.log('[KPR] App installed ✓');
     });
 
     async function installPWA() {
       if (!_deferredPrompt) return;
       _deferredPrompt.prompt();
       const { outcome } = await _deferredPrompt.userChoice;
-      console.log('[KPR] Install outcome:', outcome);
       _deferredPrompt = null;
       document.getElementById('pwaInstallBanner').style.display = 'none';
     }

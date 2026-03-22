@@ -159,7 +159,7 @@ function _buildWhatsAppMessage(rec) {
   }
   msg += L + '\n';
   msg += 'KPR Transport\n';
-  msg += '\ud83d\udcde 9640019275 | 8885519275\n';
-  msg += '\ud83d\udccd Beside DRK College, Bowrampet';
+  msg += '📞 9640019275 | 8885519275\n';
+  msg += '📍 Beside DRK College, Bowrampet';
   return msg;
 }

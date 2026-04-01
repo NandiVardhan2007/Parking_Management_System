@@ -1,12 +1,6 @@
 /* ============================================================
    KPR TRANSPORT - PARKING MANAGEMENT SYSTEM
-   app.js  —  DAY-WISE BILLING  (patched v2)
-
-   FIXES in this version
-   ─────────────────────
-   • renderRecords: replaced JSON.stringify(r) in onclick with
-     window._recMap lookup — prevents single-quote injection when
-     driver name / remarks contain apostrophes (e.g. "O'Brien").
+   app.js  —  DAY-WISE BILLING + MONTHLY REVENUE  (v3)
    ============================================================ */
 
 // ── API Config ───────────────────────────────────────────────
@@ -148,6 +142,11 @@ function liveTime24() {
   return `${p.hours}:${p.minutes}`;
 }
 
+function currentYearMonth() {
+  const p = _istParts(new Date());
+  return `${p.year}-${p.month}`;   // e.g. "2026-04"
+}
+
 function to12h(t24) {
   if (!t24) return '';
   try {
@@ -190,6 +189,16 @@ function calcBilling(entryDate, entryTime, exitDate, exitTime) {
     display: fmtDuration(days),
     amount:  days * dailyRate
   };
+}
+
+// ── Month label helper ────────────────────────────────────────
+function monthLabel(ym) {
+  // ym = "2026-04"
+  try {
+    const [y, m] = ym.split('-');
+    const d = new Date(parseInt(y), parseInt(m) - 1, 1);
+    return d.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' });
+  } catch (e) { return ym; }
 }
 
 // ── Date/Time input init ──────────────────────────────────────
@@ -246,7 +255,7 @@ function goTab(tab, btn) {
     if (_xt && !exitTimeManual) _xt.value = liveTime24();
     renderParked();
   }
-  if (tab === 'records') renderRecords();
+  if (tab === 'records') { renderRecords(); renderMonthlyRevenue(); }
   updateStats();
 }
 
@@ -273,23 +282,15 @@ function formatDate(dateStr) {
 }
 
 // ── LORRY AUTOCOMPLETE ────────────────────────────────────────
-// Debounce timer so we don't fire on every single keystroke
 let _acTimer = null;
 
-/**
- * Called by oninput on #entryLorry.
- * Shows a dropdown of previously seen lorry numbers that match the
- * current prefix, then auto-fills driver/phone/remarks on selection.
- */
 function lorryAutocomplete(val) {
   const query = val.trim().toUpperCase();
   hideLorryDropdown();
-  if (query.length < 2) return;   // need at least 2 chars before suggesting
+  if (query.length < 2) return;
 
   clearTimeout(_acTimer);
   _acTimer = setTimeout(() => {
-    // Collect unique lorry numbers whose records have any driver/phone data
-    // Prefer the most-recent record (highest token) for each lorry
     const lorryMap = {};
     db.forEach(r => {
       if (!r.lorry.startsWith(query)) return;
@@ -298,16 +299,14 @@ function lorryAutocomplete(val) {
     });
 
     const matches = Object.values(lorryMap)
-      .sort((a, b) => b.token - a.token)   // most recent first
-      .slice(0, 6);                          // cap at 6 suggestions
+      .sort((a, b) => b.token - a.token)
+      .slice(0, 6);
 
     if (!matches.length) return;
-
     showLorryDropdown(matches);
-  }, 120);   // 120 ms debounce — fast enough, not too aggressive
+  }, 120);
 }
 
-/** Render the suggestion dropdown below #entryLorry */
 function showLorryDropdown(matches) {
   let dd = document.getElementById('lorryDropdown');
   if (!dd) return;
@@ -320,7 +319,6 @@ function showLorryDropdown(matches) {
     const driverTxt = r.driver !== '--' ? r.driver : '—';
     const phoneTxt  = r.phone  !== '--' ? r.phone  : '';
     const sub       = phoneTxt ? `${driverTxt} · ${phoneTxt}` : driverTxt;
-    // Use data-lorry attribute — safe even with special chars in names
     return `<div class="ac-item" data-lorry="${r.lorry}" onclick="selectLorry('${r.lorry}')">
       <div class="ac-top">
         <span class="ac-lorry">${r.lorry}</span>
@@ -333,66 +331,43 @@ function showLorryDropdown(matches) {
   dd.style.display = 'block';
 }
 
-/** Hide and clear the dropdown */
 function hideLorryDropdown() {
   const dd = document.getElementById('lorryDropdown');
   if (dd) { dd.style.display = 'none'; dd.innerHTML = ''; }
 }
 
-/**
- * Called when a suggestion row is tapped.
- * Fills the form fields from the most recent record for that lorry.
- */
 function selectLorry(lorry) {
-  // Set the lorry input
   const lorryInput = document.getElementById('entryLorry');
   if (lorryInput) lorryInput.value = lorry;
-
   hideLorryDropdown();
 
-  // Find the most recent record for this lorry (any status)
   const past = db
     .filter(r => r.lorry === lorry)
     .sort((a, b) => b.token - a.token)[0];
 
   if (!past) return;
 
-  // Fill driver, phone, remarks — only if those fields are currently empty
-  // or hold their default '--' value, so we don't overwrite user edits.
   const dEl = document.getElementById('entryDriver');
   const pEl = document.getElementById('entryPhone');
   const rEl = document.getElementById('entryRemarks');
 
-  if (dEl && (!dEl.value.trim() || dEl.value.trim() === '--') && past.driver !== '--') {
-    dEl.value = past.driver;
-  }
-  if (pEl && (!pEl.value.trim() || pEl.value.trim() === '--') && past.phone !== '--') {
-    pEl.value = past.phone;
-  }
-  if (rEl && (!rEl.value.trim() || rEl.value.trim() === '--') && past.remarks !== '--') {
-    rEl.value = past.remarks;
-  }
+  if (dEl && (!dEl.value.trim() || dEl.value.trim() === '--') && past.driver !== '--') dEl.value = past.driver;
+  if (pEl && (!pEl.value.trim() || pEl.value.trim() === '--') && past.phone  !== '--') pEl.value = past.phone;
+  if (rEl && (!rEl.value.trim() || rEl.value.trim() === '--') && past.remarks !== '--') rEl.value = past.remarks;
 
-  // Show a friendly badge indicating the auto-fill happened
   const fillBadge = document.getElementById('acFillBadge');
   if (fillBadge) {
     const visits = db.filter(r => r.lorry === lorry).length;
     fillBadge.textContent =
       `✔ Details loaded from last visit · ${visits} visit${visits !== 1 ? 's' : ''} on record`;
     fillBadge.style.display = 'block';
-    // Auto-hide after 4 seconds
     clearTimeout(fillBadge._timer);
     fillBadge._timer = setTimeout(() => { fillBadge.style.display = 'none'; }, 4000);
   }
 
-  // Warn if the lorry is currently parked
-  if (past.status === 'IN') {
-    notify(`⚠ ${lorry} is currently parked (Token #${past.token})`, 'warn');
-  }
+  if (past.status === 'IN') notify(`⚠ ${lorry} is currently parked (Token #${past.token})`, 'warn');
 
-  // Move focus to driver field if it was auto-filled, else keep on lorry
   if (dEl && dEl.value) {
-    // Focus phone if it's the first empty field
     if (pEl && !pEl.value) pEl.focus();
     else if (dEl && !dEl.value) dEl.focus();
   }
@@ -515,7 +490,7 @@ function lookupToken(val) {
   card.style.display = 'block';
 }
 
-// ── EXIT — LOOKUP BY LORRY NUMBER ────────────────────────────
+// ── EXIT — LOOKUP BY LORRY ────────────────────────────────────
 function lookupByLorry(val) {
   const errEl   = document.getElementById('exitError');
   const card    = document.getElementById('lookupCard');
@@ -541,7 +516,6 @@ function lookupByLorry(val) {
   }
 
   const rec = matches.reduce((a, b) => (a.token > b.token ? a : b));
-
   errEl.style.display = 'none';
   document.getElementById('exitToken').value = rec.token;
   lookupToken(String(rec.token));
@@ -890,10 +864,6 @@ function renderRecords() {
     return;
   }
 
-  // FIX: store records in a window map so onclick can look up by ID.
-  // This prevents single-quote injection when driver/remarks contain
-  // apostrophes — e.g. driver name "O'Brien" would have broken the
-  // old onclick='showEntryReceipt(${JSON.stringify(r)})' approach.
   window._recMap = {};
   recs.forEach(r => { window._recMap[String(r.id)] = r; });
 
@@ -907,7 +877,6 @@ function renderRecords() {
     const exitTimeStr  = r.exitTime  ? ' ' + to12h(r.exitTime)  : '';
     const entryFull    = r.entryDisplay + entryTimeStr;
     const exitFull     = isIn ? '--' : (r.exitDisplay || '--') + exitTimeStr;
-    // Safe onclick: ID is always a MongoDB hex string (no special chars)
     const rid          = String(r.id);
     const entryBtn     = isIn
       ? `<button class="btn btn-sm btn-primary" onclick="showEntryReceipt(window._recMap['${rid}'])">Receipt</button>`
@@ -939,9 +908,123 @@ function renderRecords() {
   }).join('');
 }
 
+// ══════════════════════════════════════════════════════════════
+//  MONTHLY REVENUE SECTION
+// ══════════════════════════════════════════════════════════════
+
+// Get all months that have at least one exit, sorted newest first
+function getAvailableMonths() {
+  const months = new Set();
+  months.add(currentYearMonth()); // always include current month
+  db.filter(r => r.status === 'OUT' && r.exitDate)
+    .forEach(r => months.add(r.exitDate.slice(0, 7)));
+  return Array.from(months).sort((a, b) => b.localeCompare(a));
+}
+
+// Compute revenue stats for a YYYY-MM month string
+function getMonthStats(ym) {
+  const recs   = db.filter(r => r.status === 'OUT' && r.exitDate && r.exitDate.startsWith(ym));
+  const revenue = recs.reduce((s, r) => s + (r.amount || 0), 0);
+  const exits   = recs.length;
+  // entries this month
+  const entries = db.filter(r => r.entryDate && r.entryDate.startsWith(ym)).length;
+  return { ym, revenue, exits, entries, recs };
+}
+
+// Render the monthly revenue browser card
+function renderMonthlyRevenue() {
+  const container = document.getElementById('monthlyRevenueCard');
+  if (!container) return;
+
+  const months  = getAvailableMonths();
+  const selEl   = document.getElementById('monthPicker');
+  const selected = selEl ? selEl.value : currentYearMonth();
+  const stats   = getMonthStats(selected);
+
+  // Populate month picker options
+  if (selEl) {
+    const curVal = selEl.value || currentYearMonth();
+    // Build option set from available months + current picker value
+    const allMonths = new Set([...months, curVal]);
+    const sorted    = Array.from(allMonths).sort((a, b) => b.localeCompare(a));
+    selEl.innerHTML = sorted.map(m =>
+      `<option value="${m}" ${m === curVal ? 'selected' : ''}>${monthLabel(m)}</option>`
+    ).join('');
+  }
+
+  // Daily breakdown for the selected month
+  const dayMap = {};
+  stats.recs.forEach(r => {
+    const day = r.exitDate;
+    if (!dayMap[day]) dayMap[day] = { count: 0, amount: 0 };
+    dayMap[day].count++;
+    dayMap[day].amount += (r.amount || 0);
+  });
+  const days = Object.entries(dayMap).sort((a, b) => b[0].localeCompare(a[0]));
+
+  // Peak day
+  let peakDay = null, peakAmt = 0;
+  days.forEach(([d, v]) => { if (v.amount > peakAmt) { peakAmt = v.amount; peakDay = d; } });
+
+  const breakdownHtml = days.length
+    ? days.map(([d, v]) => `
+        <div class="mrev-day-row ${d === peakDay ? 'mrev-peak' : ''}">
+          <div class="mrev-day-date">${formatDate(d)}</div>
+          <div class="mrev-day-count">${v.count} exit${v.count !== 1 ? 's' : ''}</div>
+          <div class="mrev-day-amt">Rs.${v.amount.toLocaleString('en-IN')}</div>
+        </div>`).join('')
+    : `<div class="empty" style="padding:20px 0"><div class="ei" style="font-size:28px">📭</div><p>No exits this month</p></div>`;
+
+  const isCurrentMonth = selected === currentYearMonth();
+  const currentLabel   = isCurrentMonth
+    ? '<span style="color:#f59e0b;font-size:10px;letter-spacing:1px"> ★ THIS MONTH</span>'
+    : '';
+
+  document.getElementById('mrevLabel').innerHTML      = monthLabel(selected) + currentLabel;
+  document.getElementById('mrevRevenue').textContent  = 'Rs.' + stats.revenue.toLocaleString('en-IN');
+  document.getElementById('mrevExits').textContent    = stats.exits;
+  document.getElementById('mrevEntries').textContent  = stats.entries;
+  document.getElementById('mrevBreakdown').innerHTML  = breakdownHtml;
+
+  const avgEl = document.getElementById('mrevAvg');
+  if (avgEl) avgEl.textContent = stats.exits > 0
+    ? 'Rs.' + Math.round(stats.revenue / stats.exits).toLocaleString('en-IN') + ' avg/exit'
+    : '—';
+}
+
+function onMonthPickerChange() {
+  renderMonthlyRevenue();
+}
+
+// Navigate months: dir = -1 (previous) or +1 (next)
+function shiftMonth(dir) {
+  const selEl = document.getElementById('monthPicker');
+  if (!selEl || !selEl.value) return;
+  const [y, m] = selEl.value.split('-').map(Number);
+  const d = new Date(y, m - 1 + dir, 1);
+  const newYm = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+
+  // Add option if not already present
+  const exists = Array.from(selEl.options).some(o => o.value === newYm);
+  if (!exists) {
+    const opt = document.createElement('option');
+    opt.value = newYm;
+    opt.textContent = monthLabel(newYm);
+    // Insert in sorted order
+    const options = Array.from(selEl.options);
+    const idx = options.findIndex(o => o.value < newYm);
+    if (idx === -1) selEl.appendChild(opt);
+    else selEl.insertBefore(opt, options[idx]);
+  }
+  selEl.value = newYm;
+  renderMonthlyRevenue();
+}
+
 // ── STATS ─────────────────────────────────────────────────────
 function updateStats() {
   const today  = localDateStr();
+  const ym     = currentYearMonth();  // e.g. "2026-04"
+
   const parked = db.filter(r => r.status === 'IN').length;
   const tEnt   = db.filter(r => r.entryDate === today).length;
   const tExit  = db.filter(r => r.status === 'OUT' && r.exitDate === today).length;
@@ -949,7 +1032,11 @@ function updateStats() {
                    .reduce((s, r) => s + (r.amount || 0), 0);
   const total  = db.length;
   const exited = db.filter(r => r.status === 'OUT').length;
-  const totRev = db.filter(r => r.status === 'OUT').reduce((s, r) => s + (r.amount || 0), 0);
+
+  // ── Monthly revenue (auto-resets each calendar month) ────────────
+  const mRev = db
+    .filter(r => r.status === 'OUT' && r.exitDate && r.exitDate.startsWith(ym))
+    .reduce((s, r) => s + (r.amount || 0), 0);
 
   const set = (id, v) => { const e = document.getElementById(id); if (e) e.textContent = v; };
   set('s-parked',   parked);
@@ -959,7 +1046,7 @@ function updateStats() {
   set('s-total',    total);
   set('s-p2',       parked);
   set('s-exited',   exited);
-  set('s-totalrev', 'Rs.' + totRev.toLocaleString('en-IN'));
+  set('s-totalrev', 'Rs.' + mRev.toLocaleString('en-IN'));  // ← now shows THIS month
 }
 
 // ── DELETE / CLEAR ────────────────────────────────────────────
@@ -1060,6 +1147,15 @@ function exportExcel(filter) {
   let fname = 'KPR_All';
   if (filter === 'in')  { recs = recs.filter(r => r.status === 'IN');  fname = 'KPR_Parked'; }
   if (filter === 'out') { recs = recs.filter(r => r.status === 'OUT'); fname = 'KPR_Exited'; }
+
+  // Export by selected month if on records tab with month selected
+  if (filter === 'month') {
+    const selEl = document.getElementById('monthPicker');
+    const ym = selEl ? selEl.value : currentYearMonth();
+    recs  = db.filter(r => r.status === 'OUT' && r.exitDate && r.exitDate.startsWith(ym));
+    fname = 'KPR_' + ym;
+  }
+
   if (!recs.length) { notify('No records to export', 'error'); return; }
   const data = recs.map((r, i) => ({
     'Token No.':      '#' + (r.token || '--'),
@@ -1093,6 +1189,7 @@ async function fullRefresh() {
   await syncFromServer();
   showOnlineStatus();
   updateStats(); refreshToken(); renderRecent(); renderParked(); renderRecords();
+  renderMonthlyRevenue();
 }
 
 document.addEventListener('DOMContentLoaded', async function () {
@@ -1126,6 +1223,10 @@ document.addEventListener('DOMContentLoaded', async function () {
     _xt.addEventListener('focus', () => { exitTimeManual = true; });
     _xt.addEventListener('input', () => { exitTimeManual = true; });
   }
+
+  // Init month picker to current month
+  const selEl = document.getElementById('monthPicker');
+  if (selEl) selEl.value = currentYearMonth();
 
   startEntryTimeTick();
 

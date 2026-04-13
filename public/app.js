@@ -1,6 +1,9 @@
 /* ============================================================
    KPR TRANSPORT - PARKING MANAGEMENT SYSTEM
    app.js  —  DAY-WISE BILLING + MONTHLY REVENUE  (v3)
+   
+   BUG FIX APPLIED: Prevent autocomplete race condition
+   Changes marked with // FIX: comments
    ============================================================ */
 
 // ── API Config ───────────────────────────────────────────────
@@ -16,6 +19,9 @@ let dailyRate       = parseInt(localStorage.getItem('kpr_rate') || '130');
 let recFilterStatus = 'all';
 let backendOnline   = false;
 let initialSyncDone = false;
+
+// FIX 1: Add submission tracking flag to prevent autocomplete race condition
+let _isSubmitting   = false;
 
 // ── API helpers ──────────────────────────────────────────────
 async function apiFetch(path, opts = {}) {
@@ -337,6 +343,12 @@ function hideLorryDropdown() {
 }
 
 function selectLorry(lorry) {
+  // FIX 2: Prevent autocomplete from changing input during form submission
+  if (_isSubmitting) {
+    console.log('[KPR] Blocked selectLorry during submission:', lorry);
+    return;
+  }
+
   const lorryInput = document.getElementById('entryLorry');
   if (lorryInput) lorryInput.value = lorry;
   hideLorryDropdown();
@@ -375,12 +387,26 @@ function selectLorry(lorry) {
 
 // ── ENTRY ────────────────────────────────────────────────────
 async function recordEntry() {
+  // FIX 3: Clear all autocomplete timers BEFORE reading input value
+  // This prevents delayed selectLorry() from changing the input after we read it
+  _isSubmitting = true;
+  clearTimeout(_acTimer);
+  hideLorryDropdown();
+
   const lorryInput = document.getElementById('entryLorry');
   const lorry      = lorryInput.value.trim().toUpperCase();
-  if (!lorry) { notify('Enter lorry number!', 'error'); return; }
+  if (!lorry) { 
+    _isSubmitting = false;  // FIX 4: Re-enable on validation failure
+    notify('Enter lorry number!', 'error'); 
+    return; 
+  }
 
   const dup = db.find(r => r.lorry === lorry && r.status === 'IN');
-  if (dup) { notify('WARNING: ' + lorry + ' already parked! Serial #' + dup.token, 'error'); return; }
+  if (dup) { 
+    _isSubmitting = false;  // FIX 4: Re-enable on validation failure
+    notify('WARNING: ' + lorry + ' already parked! Serial #' + dup.token, 'error'); 
+    return; 
+  }
 
   const entryDate = document.getElementById('entryDateInput').value || localDateStr();
   const entryTime = document.getElementById('entryTimeInput').value || liveTime24();
@@ -402,7 +428,11 @@ async function recordEntry() {
       rec = resp.data;
       db.unshift(rec);
       saveLocal();
-    } catch (e) { notify('Server error: ' + e.message, 'error'); return; }
+    } catch (e) { 
+      _isSubmitting = false;  // FIX 4: Re-enable on error
+      notify('Server error: ' + e.message, 'error'); 
+      return; 
+    }
   } else {
     const token = getNextToken();
     rec = {
@@ -426,6 +456,9 @@ async function recordEntry() {
   notify('Serial #' + rec.token + ' — ' + lorry + ' entered', 'success');
   showEntryReceipt(rec);
   clearEntry();
+
+  // FIX 4: Re-enable autocomplete after successful submission
+  _isSubmitting = false;
 }
 
 function clearEntry() {
@@ -439,6 +472,9 @@ function clearEntry() {
   hideLorryDropdown();
   const fillBadge = document.getElementById('acFillBadge');
   if (fillBadge) fillBadge.style.display = 'none';
+  
+  // FIX 4: Clear submission flag when form is cleared
+  _isSubmitting = false;
 }
 
 // ── EXIT — LOOKUP ────────────────────────────────────────────
@@ -713,7 +749,7 @@ function showExitReceipt(rec) {
       <div class="th-footer">THANK YOU - DRIVE SAFE</div>
       <div class="th-qr-wrap">
         <img
-          src="data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wCEAAYGBgYHBgcICAcKCwoLCg8ODAwODxYQERAREBYiFRkVFRkVIh4kHhweJB42KiYmKjY+NDI0PkxERExfWl98fKcBBgYGBgcGBwgIBwoLCgsKDw4MDA4PFhAREBEQFiIVGRUVGRUiHiQeHB4kHjYqJiYqNj40MjQ+TERETF9aX3x8p//CABEIAqoCuAMBIgACEQEDEQH/xAAtAAEAAwEBAQEAAAAAAAAAAAAABAUGBwMCAQEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEAMQAAAC1QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKvN32OLN8/QAAPA99pzjopBzelzRtPTy9Rjtjz4kocwW2Zsza47Q5wsdFlrksFeLBX2AAQfksMdoc4WOizuiMd4e8E91ZYlxostcmen52ebVX2AAq7SlKHac46KQc3pc0bT08vw9lePPN2ObOj186rKFWWJ9AAAPCGdH9PH2AAAAAAKXHbHHHRfbxglow43DDjcUttUmO6LzropBzelzRtPTy9Rjtjz4kocwW2Zsza47Q5wsdFlrksFeLBX2AAQfksMdoc4WOizuiMd4e8E91ZYlxostcmen52ebVX2AAq7SlKHac46KQc3pc0bT08vw9lePPN2ObOj186rKFWWJ9AAAPCGdH9PH2AAAAAAUuO2OOOi1dpVmOAB0WrtKsx3ReddFIWa3AqY2dsyK3AzuiDHSNTSkphBpM2FjY6OrJWL8BbaXCD38AbPGDoUnI64g+uHszXQZ3PjRU0rXHN/iVFHReddFKvHbHHHRfbx9gAAAAAClx2xxx0WrtIRh1mKxZjZVdrVGO6LzropBzelzRoosqMUwANpU+kYyazryz0ua0pP8AiH7ngsIJ8gxfhcQyGWJFmBX+kzwPfRYrZkh7yTnfhK+DwsfoeEOzFZbVlmaXF7TFk/S0OuK/2leJ7QfmwIsoFLdUpjui866KVeO2OOAHReddFKvHbHHHRfbx9gAAAAAFLjdjjjovt4wS0YcbhhxuKW2qTHdF51Ym6YcbhhxuGHF9jpkM6L7ePsAAAAAAUuO2OONnAzYdF510UhZrcDyg2Yw9f0jnxZ67I6459Z1lma6DO58bFhBcStHVkrOU/RTOXMXHHvbUV6a7n3QefEUC2qRu2EGsppWuKn2x0U3bCDoUnI64g+uHszXQZ3PjYsIN3Ayd6RdFbc+NFTStcc3uqyzNdz7oPPj4mStcc3+JUUdF510U9gY6fogx2xGAh7HHHRfbx9gAAAAAClx2xxxs5Er2K+f+irzd9jizVnuTNFndmeUoIPp5/JYQfkAZyHMhkPovOuilXjtjjjY"
+          src="data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wCEAAYGBgYHBgcICAcKCwoLCg8ODAwODxYQERAREBYiFRkVFRkVIh4kHhweJB42KiYmKjY+NDI0PkxERExfWl98fKcBBgYGBgcGBwgIBwoLCgsKDw4MDA4PFhAREBEQFiIVGRUVGRUiHiQeHB4kHjYqJiYqNj40MjQ+TERETF9aX3x8p//CABEIAqoCuAMBIgACEQEDEQH/xAAtAAEAAwEBAQEAAAAAAAAAAAAABAUGBwMCAQEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEAMQAAAC1QAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKvN32OLN8/QAAPA99pzjopBzelzRtPTy9Rjtjz4kocwW2Zsza47Q5wsdFlrksFeLBX2AAQfksMdoc4WOizuiMd4e8E91ZYlxostcmen52ebVX2AAq7SlKHac46KQc3pc0bT08vw9lePPN2ObOj186rKFWWJ9AAAPCGdH9PH2AAAAAAKXHbHHHRfbxglow43DDjcUttUmO6LzropBzelzRtPTy9Rjtjz4kocwW2Zsza47Q5wsdFlrksFeLBX2AAQfksMdoc4WOizuiMd4e8E91ZYlxostcmen52ebVX2AAq7SlKHac46KQc3pc0bT08vw9lePPN2ObOj186rKFWWJ9AAAPCGdH9PH2AAAAAAUuO2OOOi1dpVmOAB0WrtKsx3ReddFIWa3AqY2dsyK3AzuiDHSNTSkphBpM2FjY6OrJWL8BbaXCD38AbPGDoUnI64g+uHszXQZ3PjRU0rXHN/iVFHReddFKvHbHHHRfbx9gAAAAAClx2xxx0WrtIRh1mKxZjZVdrVGO6LzropBzelzRoosqMUwANpU+kYyazryz0ua0pP+iH7ngsIJ8gxfhcQyGWJFmBX+kzwPfRYrZkh7yTnfhK+DwsfoeEOzFZbVlmaXF7TFk/S0OuK/2leJ7QfmwIsoFLdUpjui866KVeO2OOAHReddFKvHbHHHRfbx9gAAAAAFLjdjjjovt4wS0YcbhhxuKW2qTHdF51Ym6YcbhhxuGHF9jpkM6L7ePsAAAAAAUuO2OONnAzYdF510UhZrcDyg2Yw9f0jnxZ67I6459Z1lma6DO58bFhBcStHVkrOU/RTOXMXHHvbUV6a7n3QefEUC2qRu2EGsppWuKn2x0U3bCDoUnI64g+uHszXQZ3PjYsIN3Ayd6RdFbc+NFTStcc3uqyzNdz7oPPj4mStcc3+JUUdF510U9gY6fogx2xGAh7HHHRfbx9gAAAAAClx2xxxs5Er2K+f+irzd9jizVnuTNFndmeUoIPp5/JYQfkAZyHMhkPovOuilXjtjjjY"
           alt="Scan to Pay via PhonePe"
           width="140" height="140"
           style="display:block;margin:6px auto;border-radius:6px;"

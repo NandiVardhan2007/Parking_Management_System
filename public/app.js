@@ -487,12 +487,25 @@ function lookupToken(val) {
   const num = parseInt(val);
   if (!val || isNaN(num)) return;
 
-  const rec = db.find(r => r.token === num);
-  if (!rec) {
+  // FIX: Handle duplicate tokens - find ALL matches first
+  const matches = db.filter(r => r.token === num);
+  
+  if (!matches.length) {
     errEl.textContent   = 'Serial #' + num + ' not found.';
     errEl.style.display = 'block';
     return;
   }
+
+  // FIX: If multiple matches, prefer the one that's currently PARKED (status=IN)
+  // This handles the duplicate token bug gracefully
+  const rec = matches.find(r => r.status === 'IN') || matches[0];
+
+  // FIX: Warn if duplicates detected
+  if (matches.length > 1) {
+    console.warn(`[KPR] Token #${num} has ${matches.length} records! Showing: ${rec.lorry}`, matches);
+    notify(`⚠ Warning: Multiple records found for #${num}. Showing ${rec.lorry}`, 'warn');
+  }
+
   if (rec.status === 'OUT') {
     errEl.textContent   = 'Serial #' + num + ' (' + rec.lorry + ') already exited on ' + rec.exitDisplay;
     errEl.style.display = 'block';

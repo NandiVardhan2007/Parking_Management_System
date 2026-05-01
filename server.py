@@ -38,7 +38,9 @@ MAX_LORRY_LEN   = 20
 MAX_NAME_LEN    = 80
 MAX_PHONE_LEN   = 20
 MAX_REMARKS_LEN = 200
-MAX_PAGE_LIMIT  = 500
+# FIX: raised from 500 to 2000 for paginated /api/records
+# Full exports use /api/export which has NO cap
+MAX_PAGE_LIMIT  = 2000
 
 app = Flask(__name__, static_folder=None)
 CORS(app, origins=ALLOWED_ORIGINS)
@@ -68,32 +70,15 @@ def get_db():
         return f"MongoDB error: {exc}"
 
 
-# ── FIX: dedicated helper that always resyncs the counter ────────
 def _sync_token_counter():
-    """
-    Ensure the token counter document is >= the highest token
-    that actually exists in records_col.
-
-    Call this:
-      1. On every startup (inside _init_db)
-      2. Inside the DuplicateKeyError handler in create_record()
-      3. After bulk import
-
-    This makes the counter self-healing: even if Render restarts and
-    the counters collection is somehow reset (or behind), the very
-    next entry attempt will recover automatically.
-    """
     try:
         max_doc   = records_col.find_one({}, sort=[("token", DESCENDING)])
         max_token = int(max_doc["token"]) if max_doc else 0
-
-        # Create if not exists, initialised to max_token
         counters_col.update_one(
             {"_id": "token"},
             {"$setOnInsert": {"seq": max_token}},
             upsert=True,
         )
-        # If the document already exists but is BEHIND, bring it up
         counters_col.update_one(
             {"_id": "token", "seq": {"$lt": max_token}},
             {"$set": {"seq": max_token}},
@@ -117,6 +102,19 @@ def _init_db():
             records_col.create_index(**idx_kwargs)
         except Exception:
             pass
+
+    # DB-level uniqueness: at most one IN record per lorry
+    try:
+        records_col.create_index(
+            [("lorry", 1)],
+            unique=True,
+            partialFilterExpression={"status": "IN"},
+            name="unique_lorry_in",
+        )
+        print("[KPR] unique_lorry_in index ensured")
+    except Exception as e:
+        print(f"[KPR] unique_lorry_in index warning: {e}")
+
     for col, key in [(print_queue_col, "status"), (print_queue_col, "seq_id")]:
         try:
             col.create_index(key)
@@ -129,7 +127,6 @@ def _init_db():
         upsert=True,
     )
 
-    # Always sync on startup — handles counter resets after redeploy
     _sync_token_counter()
 
     counters_col.update_one(
@@ -254,6 +251,32 @@ def _post_to_sheets(url, payload):
 def _check_print_auth():
     return bool(PRINT_SECRET) and request.headers.get("X-Print-Token", "") == PRINT_SECRET
 
+def _build_filter(status=None, month=None, q=None):
+    filt = {}
+    if status and status.upper() in ("IN", "OUT"):
+        filt["status"] = status.upper()
+    if month:
+        try:
+            y, m = month.split("-")
+            start = f"{y}-{m.zfill(2)}-01"
+            nm = int(m) + 1
+            ny = int(y) + (1 if nm > 12 else 0)
+            nm = nm if nm <= 12 else 1
+            end = f"{ny}-{str(nm).zfill(2)}-01"
+            filt["exit_date"] = {"$gte": start, "$lt": end}
+        except Exception:
+            pass
+    if q:
+        safe_q = re.escape(q)
+        clauses = [
+            {"lorry":  {"$regex": safe_q, "$options": "i"}},
+            {"driver": {"$regex": safe_q, "$options": "i"}},
+        ]
+        if q.isdigit():
+            clauses.append({"token": int(q)})
+        filt["$or"] = clauses
+    return filt
+
 
 # ── Static files ──────────────────────────────────────────────────
 if PUBLIC.exists():
@@ -276,13 +299,15 @@ def health():
     db_err = get_db()
     counter_seq = None
     max_token   = None
+    total       = None
     try:
         if counters_col is not None:
             cdoc = counters_col.find_one({"_id": "token"})
             counter_seq = cdoc["seq"] if cdoc else 0
         if records_col is not None:
-            mdoc = records_col.find_one({}, sort=[("token", DESCENDING)])
+            mdoc  = records_col.find_one({}, sort=[("token", DESCENDING)])
             max_token = mdoc["token"] if mdoc else 0
+            total     = records_col.count_documents({})
     except Exception:
         pass
     return jsonify({
@@ -294,6 +319,7 @@ def health():
         "print_secret_set":    bool(PRINT_SECRET),
         "token_counter":       counter_seq,
         "max_token_in_db":     max_token,
+        "total_records":       total,
         "counter_in_sync":     counter_seq == max_token if (counter_seq is not None and max_token is not None) else None,
     })
 
@@ -304,6 +330,7 @@ def stats():
     if db_resp: return db_resp
     try:
         today = today_date()
+        ym    = today[:7]
         pipeline = [{"$group": {"_id": None,
             "parked":        {"$sum": {"$cond": [{"$eq": ["$status","IN"]}, 1, 0]}},
             "today_entries": {"$sum": {"$cond": [{"$eq": ["$entry_date", today]}, 1, 0]}},
@@ -314,8 +341,16 @@ def stats():
             "total_revenue": {"$sum": {"$cond": [{"$eq":["$status","OUT"]}, {"$ifNull":["$amount",0]}, 0]}},
         }}]
         result = list(records_col.aggregate(pipeline))
-        r = result[0] if result else {"parked":0,"today_entries":0,"today_exits":0,"today_revenue":0,"total":0,"exited":0,"total_revenue":0}
+        r = result[0] if result else {
+            "parked":0,"today_entries":0,"today_exits":0,
+            "today_revenue":0,"total":0,"exited":0,"total_revenue":0,
+        }
         r.pop("_id", None)
+        mrev = list(records_col.aggregate([
+            {"$match": {"status": "OUT", "exit_date": {"$regex": f"^{ym}"}}},
+            {"$group": {"_id": None, "v": {"$sum": {"$ifNull": ["$amount", 0]}}}},
+        ]))
+        r["monthly_revenue"] = mrev[0]["v"] if mrev else 0
         return ok(r)
     except Exception as exc:
         print(f"[KPR] /api/stats error: {exc}")
@@ -329,7 +364,6 @@ def get_settings():
     try:
         return ok({d["key"]: d["value"] for d in settings_col.find({})})
     except Exception as exc:
-        print(f"[KPR] GET /api/settings error: {exc}")
         return err(f"Settings error: {exc}", 500)
 
 
@@ -350,7 +384,6 @@ def post_settings():
     except ValueError:
         return err("Invalid rate value")
     except Exception as exc:
-        print(f"[KPR] POST /api/settings error: {exc}")
         return err(f"Settings update error: {exc}", 500)
 
 
@@ -362,22 +395,144 @@ def get_records():
         q      = request.args.get("q", "").strip()
         status = request.args.get("status", "").strip().upper()
         page   = max(1, int(request.args.get("page", "1")))
-        limit  = min(MAX_PAGE_LIMIT, max(1, int(request.args.get("limit", "200"))))
-        filt   = {}
-        if status in ("IN", "OUT"):
-            filt["status"] = status
-        if q:
-            safe_q = re.escape(q)
-            clauses = [{"lorry": {"$regex": safe_q, "$options":"i"}},
-                       {"driver":{"$regex": safe_q, "$options":"i"}}]
-            if q.isdigit():
-                clauses.append({"token": int(q)})
-            filt["$or"] = clauses
-        docs = list(records_col.find(filt).sort("_id", DESCENDING).skip((page-1)*limit).limit(limit))
-        return ok([rec_to_dict(d) for d in docs])
+        limit  = min(MAX_PAGE_LIMIT, max(1, int(request.args.get("limit", "2000"))))
+        filt   = _build_filter(status=status, q=q)
+        docs   = list(
+            records_col.find(filt)
+            .sort("_id", DESCENDING)
+            .skip((page - 1) * limit)
+            .limit(limit)
+        )
+        total  = records_col.count_documents(filt)
+        return ok([rec_to_dict(d) for d in docs], total=total, page=page, limit=limit)
     except Exception as exc:
         print(f"[KPR] GET /api/records error: {exc}")
         return err(f"Fetch records error: {exc}", 500)
+
+
+# ── FIX: Full export endpoint — no pagination cap ─────────────────
+# Called by the frontend exportExcel() for all Excel downloads.
+# Returns every matching record sorted by token ASC.
+# Optional query params: status=IN|OUT, month=YYYY-MM
+@app.get("/api/export")
+def export_records():
+    db_resp = require_db()
+    if db_resp: return db_resp
+    try:
+        status = request.args.get("status", "").strip()
+        month  = request.args.get("month", "").strip()
+        q      = request.args.get("q", "").strip()
+
+        filt = _build_filter(status=status, month=month, q=q)
+
+        # No .limit() — full collection scan for exports
+        docs = list(records_col.find(filt).sort("token", ASCENDING))
+
+        # Deduplicate: if somehow two IN records exist for same lorry,
+        # keep the higher token and flag the lower one.
+        seen_lorry_in = {}
+        deduped       = []
+        duplicates    = []
+        for doc in docs:
+            if doc.get("status") == "IN":
+                lorry = doc.get("lorry", "")
+                if lorry in seen_lorry_in:
+                    if doc["token"] > seen_lorry_in[lorry]["token"]:
+                        duplicates.append(rec_to_dict(seen_lorry_in[lorry]))
+                        seen_lorry_in[lorry] = doc
+                    else:
+                        duplicates.append(rec_to_dict(doc))
+                    continue
+                seen_lorry_in[lorry] = doc
+            deduped.append(doc)
+
+        rate    = get_rate()
+        records = [rec_to_dict(d) for d in deduped]
+
+        return ok(
+            records,
+            total=len(records),
+            duplicates_removed=len(duplicates),
+            duplicate_details=duplicates,
+            rate=rate,
+        )
+    except Exception as exc:
+        print(f"[KPR] GET /api/export error: {exc}")
+        return err(f"Export error: {exc}", 500)
+
+
+# ── Reconciliation report ─────────────────────────────────────────
+@app.get("/api/reconcile")
+def reconcile():
+    db_resp = require_db()
+    if db_resp: return db_resp
+    try:
+        issues = []
+
+        # 1. Duplicate tokens
+        for doc in records_col.aggregate([
+            {"$group": {"_id": "$token", "count": {"$sum": 1},
+                        "ids": {"$push": {"id": {"$toString": "$_id"}, "lorry": "$lorry", "status": "$status"}}}},
+            {"$match": {"count": {"$gt": 1}}},
+            {"$sort":  {"_id": 1}},
+        ]):
+            issues.append({"type": "duplicate_token", "token": doc["_id"],
+                           "count": doc["count"], "records": doc["ids"]})
+
+        # 2. Lorries with multiple IN records
+        for doc in records_col.aggregate([
+            {"$match": {"status": "IN"}},
+            {"$group": {"_id": "$lorry", "count": {"$sum": 1}, "tokens": {"$push": "$token"}}},
+            {"$match": {"count": {"$gt": 1}}},
+        ]):
+            issues.append({"type": "multiple_active_entries", "lorry": doc["_id"],
+                           "count": doc["count"], "tokens": doc["tokens"]})
+
+        # 3. Exit before entry
+        for doc in records_col.find({"status": "OUT", "exit_date": {"$exists": True, "$ne": None}}):
+            try:
+                ed = datetime.date.fromisoformat(str(doc["entry_date"])[:10])
+                xd = datetime.date.fromisoformat(str(doc["exit_date"])[:10])
+                if xd < ed:
+                    issues.append({"type": "exit_before_entry", "token": doc["token"],
+                                   "lorry": doc.get("lorry"),
+                                   "entry_date": str(doc["entry_date"]),
+                                   "exit_date":  str(doc["exit_date"])})
+            except Exception:
+                pass
+
+        # 4. Phantom parked (> 60 days old IN)
+        cutoff = (datetime.datetime.now(IST) - datetime.timedelta(days=60)).strftime("%Y-%m-%d")
+        for doc in records_col.find({"status": "IN", "entry_date": {"$lt": cutoff}}):
+            try:
+                days_parked = (datetime.datetime.now(IST).date() -
+                               datetime.date.fromisoformat(str(doc["entry_date"])[:10])).days
+            except Exception:
+                days_parked = -1
+            issues.append({"type": "phantom_parked", "token": doc["token"],
+                           "lorry": doc.get("lorry"),
+                           "entry_date": str(doc.get("entry_date")),
+                           "days_parked": days_parked})
+
+        # 5. OUT with missing exit_date
+        for doc in records_col.find({"status": "OUT", "$or": [
+            {"exit_date": None}, {"exit_date": {"$exists": False}}
+        ]}):
+            issues.append({"type": "out_missing_exit_date",
+                           "token": doc["token"], "lorry": doc.get("lorry")})
+
+        total  = records_col.count_documents({})
+        parked = records_col.count_documents({"status": "IN"})
+        exited = records_col.count_documents({"status": "OUT"})
+
+        return ok({
+            "summary": {"total_records": total, "parked": parked,
+                        "exited": exited, "issues_found": len(issues)},
+            "issues": issues,
+        })
+    except Exception as exc:
+        print(f"[KPR] GET /api/reconcile error: {exc}")
+        return err(f"Reconcile error: {exc}", 500)
 
 
 @app.get("/api/records/<rec_id>")
@@ -390,7 +545,6 @@ def get_record(rec_id):
             return err("Record not found", 404)
         return ok(rec_to_dict(doc))
     except Exception as exc:
-        print(f"[KPR] GET /api/records/{rec_id} error: {exc}")
         return err(f"Get record error: {exc}", 500)
 
 
@@ -429,22 +583,24 @@ def create_record():
             "status": "IN", "created_at": now_iso(),
         }
 
-        # ── SELF-HEALING retry loop ──────────────────────────────────
-        # On DuplicateKeyError the counter was behind the actual records
-        # (e.g. after a Render restart where counters collection reset).
-        # We resync it to the real max and retry — up to 5 times.
         for _attempt in range(5):
             try:
                 result = records_col.insert_one(doc.copy())
                 doc["_id"] = result.inserted_id
                 break
-            except DuplicateKeyError:
-                print(f"[KPR] DuplicateKeyError token={token} attempt={_attempt+1} — resyncing counter")
-                _sync_token_counter()   # ← bring counter up to real max
-                token      = next_token()
+            except DuplicateKeyError as dup_err:
+                details     = getattr(dup_err, "details", {}) or {}
+                key_pattern = details.get("keyPattern", {})
+                if "lorry" in key_pattern:
+                    existing = records_col.find_one({"lorry": lorry, "status": "IN"})
+                    token_no = existing["token"] if existing else "?"
+                    return err(f"{lorry} is already parked (Token #{token_no})", 409)
+                print(f"[KPR] DuplicateKeyError token={token} attempt={_attempt+1} — resyncing")
+                _sync_token_counter()
+                token        = next_token()
                 doc["token"] = token
         else:
-            return err("Could not assign unique token after 5 attempts — please retry", 500)
+            return err("Could not assign unique token after 5 attempts", 500)
 
         rec  = rec_to_dict(doc)
         rate = get_rate()
@@ -532,7 +688,6 @@ def delete_record(rec_id):
             return err("Record not found", 404)
         return ok(message=f"Record {rec_id} deleted")
     except Exception as exc:
-        print(f"[KPR] DELETE /api/records/{rec_id} error: {exc}")
         return err(f"Delete failed: {exc}", 500)
 
 
@@ -548,7 +703,6 @@ def delete_all_records():
         counters_col.update_one({"_id":"token"}, {"$set":{"seq":0}})
         return ok(message="All records deleted")
     except Exception as exc:
-        print(f"[KPR] DELETE /api/records error: {exc}")
         return err(f"Clear failed: {exc}", 500)
 
 
@@ -593,14 +747,12 @@ def import_records():
             except Exception as e:
                 errors.append({"row":i+1,"error":str(e)})
 
-        # Always resync after bulk import to prevent drift
         _sync_token_counter()
 
         resp = {"ok":True,"added":added,"message":f"Imported {added} of {len(records)} records"}
         if errors: resp["errors"] = errors
         return jsonify(resp)
     except Exception as exc:
-        print(f"[KPR] POST /api/import error: {exc}")
         return err(f"Import failed: {exc}", 500)
 
 
@@ -681,14 +833,8 @@ def clear_old_print_jobs():
         return err(f"Cleanup error: {exc}", 500)
 
 
-# ── Admin: manual counter resync ──────────────────────────────────
 @app.post("/api/admin/resync-counter")
 def resync_counter():
-    """
-    Force-resync the token counter to the actual max in the DB.
-    Use this ONCE on an existing deployment to fix the restarted tokens.
-    Requires X-Print-Token header for auth.
-    """
     if not _check_print_auth():
         return err("Unauthorized — send X-Print-Token header", 401)
     db_resp = require_db()
@@ -697,11 +843,7 @@ def resync_counter():
         new_max = _sync_token_counter()
         cdoc    = counters_col.find_one({"_id": "token"})
         seq     = cdoc["seq"] if cdoc else 0
-        return ok({
-            "max_token_found":    new_max,
-            "counter_now":        seq,
-            "next_token_will_be": seq + 1,
-        })
+        return ok({"max_token_found": new_max, "counter_now": seq, "next_token_will_be": seq + 1})
     except Exception as exc:
         return err(f"Resync failed: {exc}", 500)
 
